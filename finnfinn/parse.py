@@ -125,7 +125,7 @@ def parse_text(text, today):
 
 REPAIR = str.maketrans("OolI|SBZ", "00111582")
 MONEY = re.compile(r"(?<![\d/.])(?:rp\.?\s*)?(?!0)(\d{1,3}(?:[.,]\d{3})+|\d{4,})(?:[.,]\d{2})?(?:,-)?(?!\d)", re.I)
-IGNORE = re.compile(r"qty|pcs|x\s?\d|\d\s?x\b|@|no\.|telp|tel\b|npwp|kasir|trx|ref|\d{2}:\d{2}", re.I)
+IGNORE = re.compile(r"qty|pcs|[x×]\s?\d|\d\s?[x×](?!\w)|@|no\.|telp|tel\b|npwp|kasir|trx|ref|\d{2}:\d{2}", re.I)  # OCR reads "2 x" as "2 ×"
 HI = re.compile(r"grand\s*total|total\s*(bayar|pembayaran|belanja|tagihan|akhir|pesanan|harga)|jumlah\s*(bayar|tagihan)|amount\s*due|net\s*total", re.I)
 TOTAL = re.compile(r"\btotal\b|\bjumlah\b", re.I)
 SUB = re.compile(r"sub\s*total|subtotal|total\s*(item|qty|disc|diskon|promo|hemat)", re.I)
