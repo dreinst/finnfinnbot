@@ -1,0 +1,13 @@
+GoFood
+Pesanan selesai
+Warung Nasi Padang Sederhana
+Sab, 6 Sep 2026, 12:10
+1x Nasi Rendang            25.000
+2x Es Teh Manis            10.000
+1x Kerupuk                  3.000
+Subtotal                   38.000
+Biaya pengiriman           10.000
+Biaya layanan               3.000
+Diskon                     -8.000
+Total pembayaran           43.000
+Dibayar dengan GoPay
