@@ -435,7 +435,7 @@ async function setRemind(e) {
 
 // ---------- router / boot ----------
 function route() {
-  const h = (location.hash || '#beranda').slice(1);
+  const h = (location.hash || '#beranda').slice(1).split(/[&?]/)[0]; // Telegram appends &tgWebAppData=… to the fragment
   const catat = h === 'catat'; // deep link: open the sheet on Beranda
   view = VIEWS.includes(h) ? h : 'beranda';
   for (const v of VIEWS) $('view-' + v).hidden = v !== view;
@@ -524,7 +524,7 @@ async function boot() {
     await store.init();
     cats = await store.categories();
   } catch (e) {
-    return fail(e);
+    return e.status === 401 ? fail(e) : screen(e.message || 'Terjadi kesalahan', 'Coba lagi', () => location.reload());
   }
   const today = todayIso();
   ak.anchor = today;

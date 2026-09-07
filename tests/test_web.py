@@ -45,14 +45,16 @@ class WebTest(unittest.TestCase):
             db.connect().execute("DELETE FROM " + t)
         db.seed()
 
-    def req(self, method, path, body=None, auth=None, host=None):
+    def req(self, method, path, body=None, auth=None, host=None, raw=None, xff=None):
         con = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {}
         if auth:
             headers["Authorization"] = auth
         if host is not None:
             headers["Host"] = host
-        data = None
+        if xff:
+            headers["X-Forwarded-For"] = xff
+        data = raw
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
@@ -80,6 +82,12 @@ class WebTest(unittest.TestCase):
             self.assertEqual(self.req("GET", "/api/me", auth="tma nope")[0], 401)
         self.assertEqual(self.req("GET", "/api/me", auth="tma nope")[:2], (429, {"error": "terlalu banyak permintaan"}))
         self.assertEqual(self.req("GET", "/api/me", auth=self.owner)[0], 200)  # valid initData is not blocked
+
+    def test_failed_auth_limit_xff_last_hop(self):
+        for i in range(20):  # a spoofed first hop does not open a new bucket
+            self.assertEqual(self.req("GET", "/api/me", auth="tma nope", xff=f"1.2.3.{i}, 9.9.9.9")[0], 401)
+        self.assertEqual(self.req("GET", "/api/me", auth="tma nope", xff="1.2.3.99, 9.9.9.9")[0], 429)
+        self.assertEqual(self.req("GET", "/api/me", auth="tma nope", xff="9.9.9.9, 5.5.5.5")[0], 401)
 
     def test_uid_bucket(self):
         for _ in range(120):
@@ -136,6 +144,10 @@ class WebTest(unittest.TestCase):
         self.assertEqual((st, err["error"][:14]), (400, "kategori ganda"))
         self.assertEqual(self.req("PUT", "/api/categories", body=[{"jenis": "keluar", "kategori": "", "subkategori": "x"}],
                                   auth=self.owner)[0], 400)
+        for bad in ({"aktif": "x"}, {"ikon": {"a": 1}}, {"urutan": "1"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.req("PUT", "/api/categories", body=[{**dup, **bad}], auth=self.owner)[:2],
+                                 (400, {"error": "kategori tidak valid"}))
         tx = self.req("POST", "/api/tx", body=TX, auth=self.owner)[1]
         leaf = next(c for c in cats if c["subkategori"] == "Makan di luar")
         leaf["subkategori"] = "Jajan"
@@ -161,11 +173,13 @@ class WebTest(unittest.TestCase):
         self.assertTrue(s.recv(4096).startswith(b"HTTP/1.0 413"))
         s.close()
 
-    def test_bad_json(self):
-        con = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        con.request("POST", "/api/tx", body=b"{nope", headers={"Authorization": self.owner})
-        self.assertEqual(con.getresponse().status, 400)
-        con.close()
+    def test_bad_or_empty_body(self):
+        self.assertEqual(self.req("POST", "/api/tx", raw=b"{nope", auth=self.owner)[0], 400)
+        for raw in (b"", b"null"):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.req("POST", "/api/tx", raw=raw, auth=self.owner)[0], 400)
+                self.assertEqual(self.req("PUT", "/api/categories", raw=raw, auth=self.owner)[0], 400)
+                self.assertEqual(self.req("POST", "/api/remind", raw=raw, auth=self.guest)[:2], (200, {"ok": True}))
 
     def test_dev_no_auth(self):
         config.DEV_NO_AUTH = True

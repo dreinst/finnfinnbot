@@ -113,6 +113,8 @@ def _cat_error(items):
             return "kategori dan subkategori wajib diisi"
         if "id" in c and type(c["id"]) is not int:
             return "id harus angka"
+        if c.get("aktif", 1) not in (0, 1) or not isinstance(c.get("ikon", ""), str) or type(c.get("urutan", 0)) is not int:
+            return "kategori tidak valid"
         key = (c["jenis"], c["kategori"], c["subkategori"])
         if key in seen:
             return "kategori ganda: " + " / ".join(key)
@@ -175,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             u = None
         if u is None:
-            ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+            ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[-1].strip()  # last hop: the one the proxy appended
             if _allow(("ip", ip), 20):
                 self._json(401, {"error": "initData tidak valid"})
             else:
@@ -187,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
         return u
 
     def _body(self):
-        """Parsed JSON body, or None after a 413/400 response was sent."""
+        """Parsed JSON body ({} when empty or null), or None after a 413/400 response was sent."""
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -196,10 +198,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(413, {"error": "terlalu besar"})
             return None
         try:
-            return json.loads(self.rfile.read(n) or b"null")
+            body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             self._json(400, {"error": "JSON tidak valid"})
             return None
+        return {} if body is None else body
 
     def _api(self, method, path, query):
         u = self._user()

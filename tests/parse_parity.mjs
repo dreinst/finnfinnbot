@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { guessJenis, guessKategori, parseAmount, parseReceipt, parseText } from '../web/parse.js';
 
 const TODAY = '2026-09-06';
-const FIX = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'receipts');
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const FIX = join(ROOT, 'tests', 'fixtures', 'receipts');
 let failed = 0;
 
 function check(label, got, want) {
@@ -125,6 +126,13 @@ for (const f of fixtures) {
   check('receipt time next line', parseReceipt(['06/09/2026', '19:42', 'TOTAL 45.000'], TODAY).waktu, '19:42');
   check('receipt price is not time', parseReceipt(['06/09/2026', 'TOTAL 12.50'], TODAY).waktu, '');
   check('receipt merchant title', parseReceipt(['WARUNG BU TINI', 'TOTAL 45.000'], TODAY).catatan, 'Warung Bu Tini');
+  check('receipt time after colon', parseReceipt(['06/09/2026', 'Jam:19.42', 'TOTAL 45.000'], TODAY).waktu, '');
+  check('text date at start', parseText('3/9 kopi 20rb', TODAY).catatan, 'Kopi');
+}
+
+// iOS/Safari < 16.4 floor: no regex lookbehind, no logical-assignment operators anywhere in the Mini App
+for (const f of readdirSync(join(ROOT, 'web')).filter((f) => f.endsWith('.js'))) {
+  check(`syntax floor ${f}`, /\(\?<[=!]|\|\|=|&&=|\?\?=/.test(readFileSync(join(ROOT, 'web', f), 'utf8')), false);
 }
 
 if (failed) {

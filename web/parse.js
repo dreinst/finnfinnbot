@@ -1,10 +1,11 @@
 // Twin of finnfinn/parse.py — same regexes, weights and outputs; tests/parse_parity.mjs keeps them aligned.
+// Python's lookbehinds are written as a leading `(^|…)` group here: iOS/Safari < 16.4 has no lookbehind.
 
 // ---------- text (chat) ----------
 
 const AMOUNT_RE = new RegExp(String.raw`(\brp\.?\s*|\bidr\s*)?([+-]?)(\d{1,3}(?:[.,]\d{3})+|\d{1,3}(?:\s\d{3})+(?!\s*(?:rb|ribu|k|jt|juta|m)\b)|\d+)(?:[.,](\d{1,2}))?\s*(rb|ribu|k|jt|juta|m)?\b`, 'gi');
 const MULT = { rb: 1000, ribu: 1000, k: 1000, jt: 1000000, juta: 1000000, m: 1000000 };
-const DATE_RE = new RegExp(String.raw`(?<![\d/.\-])(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?(?![\d/.\-])`, 'g');
+const DATE_RE = new RegExp(String.raw`(^|[^\d/.\-])(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?(?![\d/.\-])`, 'g');
 const TYPE_RE = /\b(pemasukan|pengeluaran|masuk|keluar)\b/gi;
 const MASUK_RE = /\b(gaji|gajian|bonus|thr|masuk|pemasukan|terima|dapat|dividen|bunga|cashback|refund|jual|untung|honor|fee|komisi|hadiah)\b/i;
 
@@ -99,10 +100,10 @@ export function parseText(text, todayIso) {
     cuts.push([km.index, km.index + km[0].length]);
   }
   for (const m of s.matchAll(DATE_RE)) {
-    const d = mkDateHint(+m[1], +m[2], m[3] ? +m[3] : null, today);
+    const d = mkDateHint(+m[2], +m[3], m[4] ? +m[4] : null, today);
     if (d) {
       tanggal = d;
-      cuts.push([m.index, m.index + m[0].length]);
+      cuts.push([m.index + m[1].length, m.index + m[0].length]);
       break;
     }
   }
@@ -123,7 +124,7 @@ export function parseText(text, todayIso) {
 // ---------- receipt (OCR lines) ----------
 
 const REPAIR = { O: '0', o: '0', l: '1', I: '1', '|': '1', S: '5', B: '8', Z: '2' };
-const MONEY = new RegExp(String.raw`(?<![\d/.])(?:rp\.?\s*)?(?!0)(\d{1,3}(?:[.,]\d{3})+|\d{4,})(?:[.,]\d{2})?(?:,-)?(?!\d)`, 'gi');
+const MONEY = new RegExp(String.raw`(^|[^\d/.])(?:rp\.?\s*)?(?!0)(\d{1,3}(?:[.,]\d{3})+|\d{4,})(?:[.,]\d{2})?(?:,-)?(?!\d)`, 'gi');
 const IGNORE = new RegExp(String.raw`qty|pcs|[x×]\s?\d|\d\s?[x×](?!\w)|@|no\.|telp|tel\b|npwp|kasir|trx|ref|\d{2}:\d{2}`, 'i'); // OCR reads "2 x" as "2 ×"
 const HI = new RegExp(String.raw`grand\s*total|total\s*(bayar|pembayaran|belanja|tagihan|akhir|pesanan|harga)|jumlah\s*(bayar|tagihan)|amount\s*due|net\s*total`, 'i');
 const TOTAL = /\btotal\b|\bjumlah\b/i;
@@ -132,10 +133,10 @@ const KEMBALI = /kembali|kembalian|change/i;
 const BAYAR = /tunai|cash|debit|kredit|kartu|qris|dibayar/i;
 const PAJAK = /ppn|pajak|tax|dpp|disc|diskon|potongan|voucher|poin/i;
 const FALLBACK_SKIP = /kembali|change|tunai|cash/i;
-const R_DATE = new RegExp(String.raw`(?<!\d)(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})(?!\d)`);
-const R_DATE_NAME = new RegExp(String.raw`(?<!\d)(\d{1,2})\s*(jan|feb|mar|apr|mei|may|jun|jul|agu|aug|sep|okt|oct|nov|des|dec)[a-z]*\.?\s*(\d{2,4})(?!\d)`, 'i');
-const R_ISO = new RegExp(String.raw`(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)`);
-const R_TIME = new RegExp(String.raw`(?<!\d)(\d{1,2})[:.](\d{2})(?!\d)`);
+const R_DATE = new RegExp(String.raw`(^|\D)(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})(?!\d)`);
+const R_DATE_NAME = new RegExp(String.raw`(^|\D)(\d{1,2})\s*(jan|feb|mar|apr|mei|may|jun|jul|agu|aug|sep|okt|oct|nov|des|dec)[a-z]*\.?\s*(\d{2,4})(?!\d)`, 'i');
+const R_ISO = new RegExp(String.raw`(^|\D)(\d{4})-(\d{2})-(\d{2})(?!\d)`);
+const R_TIME = new RegExp(String.raw`(^|\D)(\d{1,2})([:.])(\d{2})(?!\d)`);
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, aug: 8,
   sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
 const BRANDS = [
@@ -160,7 +161,7 @@ function repair(line) {
 
 function amounts(line) {
   if (IGNORE.test(line) && !(HI.test(line) || TOTAL.test(line))) return [];
-  const vals = [...line.matchAll(MONEY)].map((m) => parseInt(m[1].replace(/\D/g, ''), 10));
+  const vals = [...line.matchAll(MONEY)].map((m) => parseInt(m[2].replace(/\D/g, ''), 10));
   return vals.filter((v) => v >= 100 && v <= 1000000000);
 }
 
@@ -175,7 +176,7 @@ function findDate(lines, today) {
     for (const rx of [R_DATE, R_DATE_NAME, R_ISO]) {
       const m = rx.exec(lines[i]);
       if (!m) continue;
-      let [, a, b, c] = m, d, mo, y;
+      let [, , a, b, c] = m, d, mo, y;
       if (rx === R_ISO) [y, mo, d] = [+a, +b, +c];
       else if (rx === R_DATE_NAME) [d, mo, y] = [+a, MONTHS[b.toLowerCase().slice(0, 3)], +c];
       else {
@@ -188,9 +189,9 @@ function findDate(lines, today) {
       if (dt.getTime() < lo || dt.getTime() > hi) continue;
       for (const j of [i, i + 1, i - 1]) {
         if (j >= 0 && j < lines.length) {
-          const t = R_TIME.exec(j === i ? blank(lines[j], [[m.index, m.index + m[0].length]]) : lines[j]);
-          if (t && (j === i || t[0].includes(':')) && +t[1] < 24 && +t[2] < 60) { // "12.50" off the date line is a price
-            return [dt, `${String(+t[1]).padStart(2, '0')}:${t[2]}`];
+          const t = R_TIME.exec(j === i ? blank(lines[j], [[m.index + m[1].length, m.index + m[0].length]]) : lines[j]);
+          if (t && (j === i || t[3] === ':') && +t[2] < 24 && +t[4] < 60) { // "12.50" off the date line is a price
+            return [dt, `${String(+t[2]).padStart(2, '0')}:${t[4]}`];
           }
         }
       }
