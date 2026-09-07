@@ -191,6 +191,10 @@ def guest_upsert(tg_id):
     connect().execute("INSERT OR IGNORE INTO guests (tg_id) VALUES (?)", (tg_id,))
 
 
+def guest_known(tg_id):
+    return connect().execute("SELECT 1 FROM guests WHERE tg_id=?", (tg_id,)).fetchone() is not None
+
+
 def guest_set_remind(tg_id, on):
     """→ rowcount (0 when the guest never opened the chat); never inserts."""
     return connect().execute("UPDATE guests SET remind=? WHERE tg_id=?", (1 if on else 0, tg_id)).rowcount
