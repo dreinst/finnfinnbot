@@ -5,22 +5,20 @@ import time
 from datetime import date, datetime, timedelta
 
 from . import config, db, ocr, parse, report, tg
-from .report import BUKA_APP, DASH, esc, rp, tanggal
+from .report import BUKA_APP, DASH, LINK, REMIND_OFF, REMIND_ON, esc, rp, tanggal
 
 log = logging.getLogger("finnfinn.bot")
-drafts = {}  # uid → {step, jenis, jumlah, catatan, tanggal, waktu, sumber, kategori, subkategori, guess, cats, subs, msg_id, ts}
+drafts = {}  # uid → {step, jenis, fixed, jumlah, catatan, tanggal, waktu, sumber, kategori, subkategori, guess, cats, subs, msg_id, ts}
 poll_status = "ok"  # "ok" | "conflict" (409 seen on the last getUpdates)
 _guest_seen = {}  # uid → monotonic time of the last canned reply
 TTL = 900
 MAX_PHOTO = 5 * 1024 * 1024
 ASK_JENIS, ASK_INPUT, ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM = "ASK_JENIS", "ASK_INPUT", "ASK_JUMLAH", "PICK_KATEGORI", "PICK_SUB", "CONFIRM"
 CARD = (ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM)  # steps whose message is edited in place by new text
-EMPTY = {"jenis": "keluar", "jumlah": None, "catatan": "", "tanggal": "", "waktu": "", "sumber": "teks", "kategori": None,
-         "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None}
+EMPTY = {"jenis": "keluar", "fixed": False, "jumlah": None, "catatan": "", "tanggal": "", "waktu": "", "sumber": "teks",
+         "kategori": None, "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None}
 MENU = [["📝 Catat Pengeluaran"], ["📊 Lihat Pengeluaran"]]
 BATAL = {"text": "❌ Batal", "callback_data": "x"}
-REMIND_ON = {"text": "🔔 Ingatkan aku tiap malam (23.00 WIB)", "callback_data": "r:1"}
-REMIND_OFF = {"text": "🔕 Matikan pengingat", "callback_data": "r:0"}
 GUEST_BUTTONS = BUKA_APP + [[REMIND_ON]]
 COMMANDS = [("start", "Mulai"), ("catat", "Catat pemasukan / pengeluaran"), ("lihat", "Ringkasan + dashboard"),
             ("hari", "Laporan hari ini"), ("minggu", "Laporan minggu ini"), ("bulan", "Laporan bulan ini"),
@@ -149,9 +147,12 @@ def on_text(uid, text):
     d = draft(uid)
     if d and d["step"] == ASK_JUMLAH and not p["catatan"]:  # a bare number answers the nominal prompt
         d["jumlah"] = p["jumlah"]
+        if p["tanggal"] != t.date().isoformat():  # an explicit date hint travels with it; a receipt's own date is kept otherwise
+            d["tanggal"] = p["tanggal"]
     else:
-        jenis = d["jenis"] if d and d["step"] != ASK_JENIS else p["jenis"]  # a chosen/guessed jenis sticks; 🔁 flips it
-        d = {**EMPTY, "jenis": jenis, "jumlah": p["jumlah"], "catatan": p["catatan"], "tanggal": p["tanggal"],
+        fixed = bool(d and d["fixed"])  # jenis chosen via j:* or 🔁 sticks across retypes; a guessed one is re-guessed
+        jenis = d["jenis"] if fixed else p["jenis"]
+        d = {**EMPTY, "jenis": jenis, "fixed": fixed, "jumlah": p["jumlah"], "catatan": p["catatan"], "tanggal": p["tanggal"],
              "waktu": t.strftime("%H:%M"), "multiple": p["multiple"], "msg_id": d["msg_id"] if d and d["step"] in CARD else None,
              "guess": (p["kategori"], p["subkategori"]) if jenis == p["jenis"] else parse.guess_kategori(p["catatan"], jenis)}
     if p["ambiguous"]:
@@ -162,7 +163,20 @@ def on_text(uid, text):
 
 
 def read_receipt(uid, mid, file_id):
-    """Per-photo worker: download → ocr.run (serialized inside) → parse_receipt → draft → card."""
+    """Per-photo worker: any failure is logged + DM'd like the poll loop, and the ⏳ card is not left hanging."""
+    try:
+        receipt_card(uid, mid, file_id)
+    except Exception as e:
+        log.exception("struk %s gagal", uid)
+        try:
+            tg.tg_edit(uid, mid, KURANG_JELAS)
+        except Exception:
+            pass
+        report.alert_error(e)
+
+
+def receipt_card(uid, mid, file_id):
+    """Download → ocr.run (serialized inside) → parse_receipt → draft → card."""
     try:
         lines = ocr.run(tg.tg_get_file(file_id, MAX_PHOTO))
     except ocr.Busy:
@@ -210,7 +224,7 @@ def lihat(uid):
     minggu = report.sums((today - timedelta(today.weekday())).isoformat(), today.isoformat())[1]
     bulan = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
     tg.tg_send(uid, f"📊 Hari ini ({tanggal(today, year=False)}): keluar {rp(hari[1])} · masuk {rp(hari[0])}\n"
-                    f"Minggu ini: keluar {rp(minggu)} · Bulan ini: {rp(bulan)}\nDashboard-mu siap 👇", buttons=DASH)
+                    f"Minggu ini: keluar {rp(minggu)} · Bulan ini: {rp(bulan)}\nDashboard-mu siap 👇" + LINK, buttons=DASH)
 
 
 def send_report(uid, kind):
@@ -253,16 +267,16 @@ def on_guest(uid, msg):
     db.guest_upsert(uid)
     cmd = command(msg)
     if cmd == "/start" or not known:
-        return tg.tg_send(uid, START_GUEST.format(nama=esc(msg["from"].get("first_name") or "kamu")), buttons=GUEST_BUTTONS)
-    if cmd == "/pengingat":
-        on = uid in db.guests_to_remind()
-        return tg.tg_send(uid, f"Pengingat malam (23.00 WIB) saat ini <b>{'aktif' if on else 'nonaktif'}</b>.",
-                          buttons=[[REMIND_OFF if on else REMIND_ON]])
+        return tg.tg_send(uid, START_GUEST.format(nama=esc(msg["from"].get("first_name") or "kamu")) + LINK, buttons=GUEST_BUTTONS)
     if time.monotonic() - _guest_seen.get(uid, -60) < 60:
         return
     if len(_guest_seen) >= 10_000:
         _guest_seen.clear()
     _guest_seen[uid] = time.monotonic()
+    if cmd == "/pengingat":
+        on = uid in db.guests_to_remind()
+        return tg.tg_send(uid, f"Pengingat malam (23.00 WIB) saat ini <b>{'aktif' if on else 'nonaktif'}</b>.",
+                          buttons=[[REMIND_OFF if on else REMIND_ON]])
     tg.tg_send(uid, GUEST_REPLY, buttons=GUEST_BUTTONS)
 
 
@@ -275,13 +289,10 @@ def on_callback(cb):
     if uid not in config.OWNER_IDS:
         return tg.tg_answer_cb(cid)
     key, _, arg = data.partition(":")
-    if key == "d":
+    if key == "d" and arg.isdigit():
         tg.tg_answer_cb(cid)
         db.delete_tx(int(arg))
         return tg.tg_edit(uid, mid, "Dihapus 🗑 Catatan dibatalkan.")
-    if key == "rep":
-        tg.tg_answer_cb(cid)
-        return send_report(uid, arg)
     d = draft(uid)
     if not d or d["msg_id"] != mid:
         tg.tg_answer_cb(cid, STALE)
@@ -291,10 +302,10 @@ def on_callback(cb):
         drafts.pop(uid, None)
         tg.tg_edit(uid, mid, "Oke, dibatalkan. Kapan pun siap, ketik lagi ya 🙂")
     elif key == "j":
-        d["jenis"] = "masuk" if arg == "m" else "keluar"
+        d["jenis"], d["fixed"] = ("masuk" if arg == "m" else "keluar"), True
         show(uid, d, ASK_INPUT, f"Oke, <b>{'Pemasukan' if arg == 'm' else 'Pengeluaran'}</b>. Ketik nominal + keterangan "
                                 "(contoh: <code>35000 nasi padang</code>) atau kirim foto struk 📸.", [])
-    elif key == "a":
+    elif key == "a" and arg.isdigit():
         d["jumlah"] = int(arg)
         after_amount(uid, d)
     elif key == "c" and arg.isdigit() and int(arg) < len(d["cats"]):
@@ -306,7 +317,7 @@ def on_callback(cb):
     elif key == "b":
         pick_kategori(uid, d)
     elif key == "e" and arg == "t":
-        d["jenis"] = "masuk" if d["jenis"] == "keluar" else "keluar"
+        d["jenis"], d["fixed"] = ("masuk" if d["jenis"] == "keluar" else "keluar"), True
         d["kategori"] = d["subkategori"] = None
         d["guess"] = parse.guess_kategori(d["catatan"], d["jenis"])
         pick_kategori(uid, d)
@@ -342,6 +353,8 @@ def handle_update(update):
         return on_photo(uid, msg, max(photo, key=lambda p: p["width"] * p["height"]))
     if (doc.get("mime_type") or "").startswith("image/"):
         return on_photo(uid, msg, doc)
+    if doc:
+        return tg.tg_send(uid, TOO_BIG)
     text, cmd = (msg.get("text") or "").strip(), command(msg)
     if cmd:
         on_command(uid, msg, cmd)
@@ -386,4 +399,4 @@ def poll_forever(stop):
                 handle_update(u)
             except Exception as e:
                 log.exception("update %s gagal", u["update_id"])
-                report.alert(f"⚠️ Finn Finn error: {type(e).__name__}: {str(e)[:120]}")
+                report.alert_error(e)

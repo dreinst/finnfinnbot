@@ -95,52 +95,65 @@ class ReportTest(unittest.TestCase):
         report.tick(at(2026, 9, 6, 23, 1))  # restart / next pass: claimed already
         self.assertEqual(len(self.sent), 2)
 
-    def test_tick_failure_unclaims_and_alerts(self):
-        calls = []
-
-        def boom(chat_id, text, parse_mode="HTML", buttons=None):
-            calls.append((chat_id, text))
-            if chat_id == 2:
-                raise RuntimeError("Bad Gateway")
+    def failing(self, fail, desc):
+        def send(chat_id, text, parse_mode="HTML", buttons=None):
+            self.sent.append((chat_id, text))
+            if chat_id in fail:
+                raise RuntimeError(desc)
             return {"result": {"message_id": 1}}
-        tg.tg_send = boom
-        report.tick(at(2026, 9, 6, 23, 0, 30))
-        self.assertTrue(db.claim("harian", "2026-09-06"))  # unclaimed → the same-day window retries
-        self.assertEqual(calls[-1][0], 1)
-        self.assertTrue(calls[-1][1].startswith("⚠️ Finn Finn error: RuntimeError: Bad Gateway"))
+        tg.tg_send = send
 
-    def test_reminder_403_deletes_guest(self):
-        db.guest_upsert(42)
-        db.guest_set_remind(42, True)
-        db.guest_upsert(43)
-        db.guest_set_remind(43, True)
+    def test_tick_transient_failure_unclaims_and_alerts(self):
+        self.failing({1, 2}, "Bad Gateway")
+        report.tick(at(2026, 9, 6, 23, 0, 30))
+        self.assertTrue(db.claim("harian", "2026-09-06"))  # every owner failed → unclaimed → the same-day window retries
+        self.assertTrue(self.sent[-1][1].startswith("⚠️ Finn Finn error: RuntimeError: Bad Gateway"))
+
+    def test_tick_terminal_failure_keeps_claim(self):
+        self.failing({1, 2}, "Forbidden: bot was blocked by the user")
+        report.tick(at(2026, 9, 6, 23, 0, 30))
+        report.tick(at(2026, 9, 6, 23, 1))
+        harian = [c for c, t in self.sent if t.startswith("🌙")]
+        self.assertEqual(harian, [1, 2])  # a 4xx is not retried on the next pass
+        self.assertFalse(db.claim("harian", "2026-09-06"))
+        self.assertEqual(sum(t.startswith("⚠️") for _, t in self.sent), 1)
+
+    def test_tick_partial_failure_never_resends(self):
+        self.failing({2}, "Bad Gateway")
+        report.tick(at(2026, 9, 6, 23, 0, 30))
+        report.tick(at(2026, 9, 6, 23, 1))
+        self.assertEqual([c for c, t in self.sent if t.startswith("🌙")], [1, 2])  # owner 1 got it exactly once
+        self.assertFalse(db.claim("harian", "2026-09-06"))
+        self.assertTrue(self.sent[-1][1].startswith("⚠️ Finn Finn error: RuntimeError: Bad Gateway"))
+
+    def test_reminder_dead_chat_deletes_guest(self):
+        for g in (41, 42, 43):
+            db.guest_upsert(g)
+            db.guest_set_remind(g, True)
+        descs = {41: "Bad Request: chat not found", 42: "Forbidden: bot was blocked by the user"}
 
         def send(chat_id, text, parse_mode="HTML", buttons=None):
             self.sent.append((chat_id, text))
-            if chat_id == 42:
-                raise RuntimeError("Forbidden: bot was blocked by the user")
+            if chat_id in descs:
+                raise RuntimeError(descs[chat_id])
             return {"result": {"message_id": 1}}
         tg.tg_send = send
         report.tick(at(2026, 9, 6, 23, 0, 30))
         self.assertEqual(db.guests_to_remind(), [43])
         self.assertIn((43, report.REMINDER), self.sent)
-        self.assertFalse(db.claim("pengingat", "2026-09-06:42"))  # a 403 is a completed job, not a retry
+        self.assertFalse(db.claim("pengingat", "2026-09-06:42"))  # a dead chat is a completed job, not a retry
+        self.assertFalse(db.claim("pengingat", "2026-09-06:41"))
         self.assertFalse(any(t.startswith("⚠️") for _, t in self.sent))
 
-    def test_skip_missed(self):
-        report.skip_missed(at(2026, 9, 7, 12, 0))
-        self.assertFalse(db.claim("mingguan", "2026-W35"))  # Sun 30 Aug: window closed → marked skipped
-        self.assertFalse(db.claim("bulanan", "2026-08"))
-        self.assertFalse(db.claim("tahunan", "2025"))
-        self.assertTrue(db.claim("mingguan", "2026-W36"))  # Sun 6 Sep: still inside the window
-
     def test_loop_idle_pass_refreshes_last_tick(self):
+        db.meta_set("last_tick", "2026-01-01T00:00:00+07:00")  # stale boot: only a log line, nothing claimed
         before = report.last_tick
         stop = threading.Event()
         threading.Timer(0.05, stop.set).start()
         report.loop(stop)
         self.assertGreater(report.last_tick, before)
         self.assertRegex(db.meta_get("last_tick"), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+07:00$")
+        self.assertTrue(db.claim("mingguan", "2026-W35"))
 
     # ---------- builders ----------
 
@@ -185,6 +198,10 @@ class ReportTest(unittest.TestCase):
         self.assertIn("<pre>Traffic bulanan (keluar)\nJan ▇▇▇▇▇  1,2jt\nFeb ▇      300rb\nMar            0\n", t)
         self.assertIn("🌱 Bulan paling hemat: Feb (Rp 300.000)\n🔥 Bulan paling boros: Jan (Rp 1.200.000)\nTop 3 kategori:\n", t)
         self.assertTrue(t.endswith("Selamat tahun baru, Donny! Tahun ini kita catat lebih rapi lagi 🌱"))
+        today = datetime.now(WIB).date()  # on-demand /bulan mid-month averages over the elapsed days only
+        db.add_tx({**TX, "jumlah": 90000, "tanggal": today.replace(day=1).isoformat()})
+        keluar = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
+        self.assertIn(f"📅 Rata-rata harian: {report.rp(keluar // today.day)}\n", report.build_bulanan(today.year, today.month))
 
     def test_backup_prunes(self):
         bdir = os.path.join(self.tmp.name, "backups")

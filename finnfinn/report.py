@@ -13,6 +13,9 @@ WINDOW = timedelta(days=3)  # catch-up for mingguan/bulanan/tahunan; harian/peng
 WEB_APP = {"web_app": {"url": config.WEBAPP_URL}} if config.WEBAPP_URL.startswith("https") else None  # Telegram needs HTTPS for web_app
 DASH = [[{"text": "📊 Buka Dashboard", **WEB_APP}]] if WEB_APP else []
 BUKA_APP = [[{"text": "📱 Buka Finn Finn", **WEB_APP}]] if WEB_APP else []
+LINK = "" if WEB_APP else "\n" + config.WEBAPP_URL  # local self-host: plain link in the text instead of a web_app button
+REMIND_ON = {"text": "🔔 Ingatkan aku tiap malam (23.00 WIB)", "callback_data": "r:1"}
+REMIND_OFF = {"text": "🔕 Matikan pengingat", "callback_data": "r:0"}
 HARI = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
 BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 BULAN_FULL = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
@@ -57,9 +60,28 @@ def alert(text):
         log.error("DM peringatan gagal: %s", e)
 
 
+def alert_error(e):
+    alert(f"⚠️ Finn Finn error: {type(e).__name__}: {str(e)[:120]}")
+
+
+def terminal(e):
+    """A Telegram 4xx no retry can fix (blocked, chat gone, bad markup)."""
+    return isinstance(e, RuntimeError) and str(e).startswith(("Bad Request", "Forbidden", "HTTP 400", "HTTP 403"))
+
+
 def send_owners(text):
+    """Each owner gets one send; raises only when every owner failed, so a retry never re-sends to the others."""
+    errs = []
     for uid in sorted(config.OWNER_IDS):
-        tg.tg_send(uid, text, buttons=DASH)
+        try:
+            tg.tg_send(uid, text + LINK, buttons=DASH)
+        except Exception as e:
+            log.exception("kirim ke %s gagal", uid)
+            errs.append(e)
+    if errs and len(errs) == len(config.OWNER_IDS):
+        raise errs[0]
+    if errs:
+        alert_error(errs[0])
 
 
 def sums(frm, to):
@@ -150,8 +172,10 @@ def build_bulanan(year, month):
     subs = [f"{i}. {ikon(r['kategori'])} {esc(r['subkategori'])} — {rp(r['total'])} ({round(r['total'] * 100 / keluar)}%)"
             for i, r in enumerate(cat[:5], 1)]
     boros = max(day.items(), key=lambda kv: kv[1], default=None)
+    today = datetime.now(config.WIB).date()
+    days = today.day if (year, month) == (today.year, today.month) else last.day  # on-demand mid-month: elapsed days only
     return (f"🗓 <b>Laporan Bulanan — {BULAN_FULL[month - 1]} {year}</b>\n💰 Masuk {rp(masuk)} · 💸 Keluar {rp(keluar)}\n"
-            f"{_saldo(masuk, keluar)}\n📅 Rata-rata harian: {rp(keluar // last.day)}\n\n"
+            f"{_saldo(masuk, keluar)}\n📅 Rata-rata harian: {rp(keluar // days)}\n\n"
             + _bars("Traffic mingguan (keluar)", weeks)
             + ("\nTop 5 sub-kategori:\n" + "\n".join(subs) if subs else "")
             + (f"\n🔥 Hari terboros: {tanggal(date.fromisoformat(boros[0]), year=False)} ({rp(boros[1])})" if boros else "")
@@ -191,11 +215,12 @@ def backup(day=None):
 def _remind(tg_id):
     time.sleep(0.05)  # < 30 msg/s
     try:
-        tg.tg_send(tg_id, REMINDER, buttons=BUKA_APP + [[{"text": "🔕 Matikan pengingat", "callback_data": "r:0"}]])
+        tg.tg_send(tg_id, REMINDER, buttons=BUKA_APP + [[REMIND_OFF]])
     except RuntimeError as e:
-        if "forbidden" not in str(e).lower() and "403" not in str(e):
+        s = str(e).lower()
+        if not (s.startswith("forbidden") or "chat not found" in s or "403" in s):
             raise
-        db.guest_delete(tg_id)  # blocked / never started: drop the id entirely
+        db.guest_delete(tg_id)  # blocked / deactivated / never started: drop the id entirely
 
 
 def _bulanan(year, month):
@@ -234,38 +259,28 @@ def due(now):
     return jobs
 
 
-def skip_missed(now):
-    """Boot: the newest period per kind whose 3-day window closed unsent is logged and marked so it never fires."""
-    seen = set()
-    for n in range(3, 400):
-        for kind, key, _, at in _windowed(now.date() - timedelta(n), now.tzinfo):
-            if kind not in seen and now >= at + WINDOW:
-                seen.add(kind)
-                if db.claim(kind, key):
-                    log.warning("%s %s terlewat lebih dari 3 hari, dilewati", kind, key)
-
-
 def tick(now):
-    """One ticker pass: claim + run every due job; a failure releases the claim so the catch-up window retries it."""
+    """One ticker pass: claim + run every due job; a transient failure releases the claim so the catch-up window retries it."""
+    global last_tick
     for kind, key, fn in due(now):
         if db.claim(kind, key):
             try:
                 fn()
                 log.info("%s %s selesai", kind, key)
             except Exception as e:
-                db.unclaim(kind, key)
+                if not terminal(e):
+                    db.unclaim(kind, key)
                 log.exception("%s %s gagal", kind, key)
-                alert(f"⚠️ Finn Finn error: {type(e).__name__}: {str(e)[:120]}")
+                alert_error(e)
+        last_tick = time.monotonic()  # many small jobs in one pass must not trip the watchdog
 
 
 def loop(stop):
     """30-s WIB ticker: claim due jobs via db.claim, run them, refresh last_tick every pass."""
     global last_tick
-    try:
-        if config.OWNER_IDS:
-            skip_missed(datetime.now(config.WIB))
-    except Exception:
-        log.exception("cek laporan terlewat gagal")
+    prev = db.meta_get("last_tick")
+    if prev and datetime.now(config.WIB) - datetime.fromisoformat(prev) > WINDOW:
+        log.warning("ticker terakhir %s: laporan yang terlewat > 3 hari dilewati", prev)
     while not stop.is_set():
         now = datetime.now(config.WIB)
         try:
