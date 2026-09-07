@@ -31,8 +31,6 @@ def cb(uid, data, mid):
 
 PHOTO = {"photo": [{"file_id": "small", "width": 90, "height": 120, "file_size": 1000},
                    {"file_id": "big", "width": 900, "height": 1200, "file_size": 90000}]}
-if not hasattr(ocr, "LOCK"):  # Phase 0 stub (pre-1C merge): the real ocr.py defines both
-    ocr.LOCK, ocr.Busy = threading.Lock(), type("Busy", (Exception,), {})
 
 
 class BotTest(unittest.TestCase):

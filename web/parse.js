@@ -125,7 +125,7 @@ export function parseText(text, todayIso) {
 
 const REPAIR = { O: '0', o: '0', l: '1', I: '1', '|': '1', S: '5', B: '8', Z: '2' };
 const MONEY = new RegExp(String.raw`(^|[^\d/.])(?:rp\.?\s*)?(?!0)(\d{1,3}(?:[.,]\d{3})+|\d{4,})(?:[.,]\d{2})?(?:,-)?(?!\d)`, 'gi');
-const IGNORE = new RegExp(String.raw`qty|pcs|[x×]\s?\d|\d\s?[x×](?!\w)|@|no\.|telp|tel\b|npwp|kasir|trx|ref|\d{2}:\d{2}`, 'i'); // OCR reads "2 x" as "2 ×"
+const IGNORE = new RegExp(String.raw`qty|pcs|[x×]\s?\d|\d\s?[x×](?!\w)|@|no\.|telp|tel\b|npwp|kasir|trx|ref|struk|nota|layanan|\d{2}:\d{2}`, 'i'); // OCR reads "2 x" as "2 ×"
 const HI = new RegExp(String.raw`grand\s*total|total\s*(bayar|pembayaran|belanja|tagihan|akhir|pesanan|harga)|jumlah\s*(bayar|tagihan)|amount\s*due|net\s*total`, 'i');
 const TOTAL = /\btotal\b|\bjumlah\b/i;
 const SUB = new RegExp(String.raw`sub\s*total|subtotal|total\s*(item|qty|disc|diskon|promo|hemat)`, 'i');
