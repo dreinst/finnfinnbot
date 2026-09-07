@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 
-from . import bot, config, db, report, tg, web
+from . import bot, config, db, report, web
 
 log = logging.getLogger("finnfinn")
 
@@ -32,11 +32,7 @@ def main():
     while not stop.wait(30):
         if time.monotonic() - report.last_tick > 300:
             log.error("scheduler macet > 5 menit, restart otomatis")
-            if config.FIRST_OWNER:
-                try:
-                    tg.tg_send(config.FIRST_OWNER, "⚠️ Finn Finn: scheduler macet > 5 menit, restart otomatis.")
-                except Exception as e:
-                    log.error("DM watchdog gagal: %s", e)
+            report.alert("⚠️ Finn Finn: scheduler macet > 5 menit, restart otomatis.")
             os._exit(1)
     for t in threads:  # report first so a claimed-but-unsent job finishes before the process dies
         t.join(timeout=10)
