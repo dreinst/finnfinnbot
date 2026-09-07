@@ -20,18 +20,18 @@ def run(img_bytes):
     try:
         ctx = multiprocessing.get_context("spawn")
         r, w = ctx.Pipe(duplex=False)
-        p = ctx.Process(target=_child, args=(w, img_bytes), daemon=True)
-        p.start()
-        w.close()
-        res = None
-        ok = r.poll(DEADLINE)  # read before join: a child blocked on a full pipe could never exit
-        if ok:
-            try:
-                res = r.recv()
-            except EOFError:
-                pass
-            p.join(5)
-        r.close()
+        with r, w:  # both ends closed even when start() fails mid-way
+            p = ctx.Process(target=_child, args=(w, img_bytes), daemon=True)
+            p.start()
+            w.close()  # right away, so a dead child shows as EOF instead of a 30 s wait
+            res = None
+            ok = r.poll(DEADLINE)  # read before join: a child blocked on a full pipe could never exit
+            if ok:
+                try:
+                    res = r.recv()
+                except EOFError:
+                    pass
+                p.join(5)
         if p.is_alive():
             p.kill()
             p.join()

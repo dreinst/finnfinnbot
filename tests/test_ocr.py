@@ -1,6 +1,7 @@
 """ocr.py without rapidocr: line grouping, Busy, deadline and child-failure paths (fake spawn children).
 
-FINNFINN_REAL_OCR=1 (inside the Docker image) also runs a real RapidOCR pass on a rendered receipt.
+tests/ is dockerignored, so the real RapidOCR pass runs against a freshly built image with tests mounted:
+    docker run --rm -v "$PWD/tests:/app/tests:ro" -e FINNFINN_REAL_OCR=1 <image> python -m unittest
 """
 import io
 import multiprocessing
