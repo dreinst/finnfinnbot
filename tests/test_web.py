@@ -7,7 +7,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 
-from finnfinn import config, db, web
+from finnfinn import config, db, tg, web
 
 from .test_initdata import TOKEN, build
 
@@ -68,6 +68,23 @@ class WebTest(unittest.TestCase):
     def test_me(self):
         self.assertEqual(self.req("GET", "/api/me", auth=self.owner)[1], {"mode": "owner", "nama": "Donny", "tg_id": OWNER})
         self.assertEqual(self.req("GET", "/api/me", auth=self.guest)[1], {"mode": "guest", "nama": "Andrew", "tg_id": GUEST})
+
+    def test_avatar(self):
+        saved = tg.tg_user_photo, tg.tg_get_file
+        try:
+            tg.tg_user_photo = lambda uid: "photo-file-id" if uid == OWNER else None
+            tg.tg_get_file = lambda file_id, max_bytes: b"\xff\xd8\xfake-jpeg"
+            status, body, headers = self.req("GET", "/api/avatar", auth=self.owner)
+            self.assertEqual((status, body, headers.get("Content-Type"), headers.get("Cache-Control")),
+                             (200, b"\xff\xd8\xfake-jpeg", "image/jpeg", "private, max-age=3600"))
+            self.assertEqual(self.req("GET", "/api/avatar", auth=self.guest)[:2], (404, {"error": "tidak ada foto"}))
+
+            def boom(uid):
+                raise RuntimeError("Telegram gagal")
+            tg.tg_user_photo = boom
+            self.assertEqual(self.req("GET", "/api/avatar", auth=self.owner)[:2], (404, {"error": "tidak ada foto"}))
+        finally:
+            tg.tg_user_photo, tg.tg_get_file = saved
 
     def test_auth_errors(self):
         self.assertEqual(self.req("GET", "/api/me")[:2], (401, {"error": "initData tidak valid"}))

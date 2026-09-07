@@ -183,7 +183,8 @@ class ReportTest(unittest.TestCase):
         self.assertIn("<pre>Traffic harian (keluar)\nSen ▇▇▇▇   320rb\nSel ▇▇     150rb\nRab ▇▇▇    240rb\nKam ▇       80rb\n"
                       "Jum ▇▇▇▇▇  410rb\nSab ▇▇     187rb\nMin ▇       43rb</pre>\nPer kategori:\n"
                       "🍽 Makanan &amp; Minuman  Rp 1.430.000 (100%)", text)
-        self.assertTrue(text.endswith("\n\nvs minggu lalu: keluar ▲ 43% 👀"))
+        self.assertTrue(text.endswith("\n\nvs minggu lalu: keluar ▲ 43% 👀\n"
+                                       "💡 Tip Mingguan: Coba kurangi pengeluaran di sektor Makanan &amp; Minuman untuk minggu depan, ya!"))
 
     def test_bulanan_and_tahunan(self):
         db.add_tx({**TX, "jumlah": 1200000, "tanggal": "2026-01-15"})
@@ -202,6 +203,24 @@ class ReportTest(unittest.TestCase):
         db.add_tx({**TX, "jumlah": 90000, "tanggal": today.replace(day=1).isoformat()})
         keluar = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
         self.assertIn(f"📅 Rata-rata harian: {report.rp(keluar // today.day)}\n", report.build_bulanan(today.year, today.month))
+
+    def test_sisa_kuota_harian(self):
+        self.assertIsNone(report.sisa_kuota_harian(date(2026, 9, 6)))  # no budget set
+        db.meta_set("budget_bulanan", "3000000")  # 3jt / 30 hari = 100rb/hari
+        self.assertEqual(report.sisa_kuota_harian(date(2026, 9, 6)), 600000)  # day 6, no spending yet
+        db.add_tx({**TX, "jumlah": 100000, "tanggal": "2026-09-06"})
+        self.assertEqual(report.sisa_kuota_harian(date(2026, 9, 6)), 500000)
+        text = report.build_harian(date(2026, 9, 6))
+        self.assertIn("💡 Sisa Kuota Harianmu: Rp 500.000\n", text)
+        db.add_tx({**TX, "jumlah": 900000, "tanggal": "2026-09-06"})
+        self.assertIn("⚠️ Kuota harianmu sudah lewat Rp 400.000\n", report.build_harian(date(2026, 9, 6)))
+
+    def test_bulanan_disisihkan_and_budgetbaru_hint(self):
+        db.add_tx({**TX, "jenis": "masuk", "jumlah": 5000000, "kategori": "Gaji", "subkategori": "Umum", "tanggal": "2026-09-01"})
+        db.add_tx({**TX, "jumlah": 2000000, "tanggal": "2026-09-01"})
+        text = report.build_bulanan(2026, 9)
+        self.assertTrue(text.endswith("🏦 Disisihkan (Tabungan/Investasi): Rp 3.000.000\n"
+                                       "📣 Siap merencanakan budget bulan depan? Ketik <code>/budgetbaru [nominal]</code> untuk mulai!"))
 
     def test_backup_prunes(self):
         bdir = os.path.join(self.tmp.name, "backups")

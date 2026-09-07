@@ -16,22 +16,26 @@ MAX_PHOTO = 5 * 1024 * 1024
 ASK_JENIS, ASK_INPUT, ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM = "ASK_JENIS", "ASK_INPUT", "ASK_JUMLAH", "PICK_KATEGORI", "PICK_SUB", "CONFIRM"
 CARD = (ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM)  # steps whose message is edited in place by new text
 EMPTY = {"jenis": "keluar", "fixed": False, "jumlah": None, "catatan": "", "tanggal": "", "waktu": "", "sumber": "teks",
-         "kategori": None, "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None}
+         "kategori": None, "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None, "edit_id": None}
 MENU = [["📝 Catat Pengeluaran"], ["📊 Lihat Pengeluaran"]]
 BATAL = {"text": "❌ Batal", "callback_data": "x"}
 GUEST_BUTTONS = BUKA_APP + [[REMIND_ON]]
 COMMANDS = [("start", "Mulai"), ("catat", "Catat pemasukan / pengeluaran"), ("lihat", "Ringkasan + dashboard"),
             ("hari", "Laporan hari ini"), ("minggu", "Laporan minggu ini"), ("bulan", "Laporan bulan ini"),
-            ("tahun", "Ringkasan tahun ini"), ("backup", "Kirim backup database"), ("pengingat", "Pengingat malam")]
+            ("tahun", "Ringkasan tahun ini"), ("backup", "Kirim backup database"), ("pengingat", "Pengingat malam"),
+            ("budgetbaru", "Atur target budget bulanan")]
 
 START_OWNER = (
     "Halo {nama}! 👋 Aku <b>Finn Finn</b>, pencatat keuangan pribadimu.\n\n"
     "Cara pakai:\n"
     "• Ketik langsung, contoh: <code>50000 kopi</code> atau <code>gaji 7.500.000</code>\n"
-    "• Atau kirim <b>foto struk</b> 📸, nanti aku baca totalnya\n"
+    "• Atau kirim <b>foto struk</b> 📸 — kalau fotonya jelas, langsung kucatat otomatis (bisa di-undo)\n"
     "• Tekan <b>📝 Catat Pengeluaran</b> untuk dipandu\n"
     "• Tekan <b>📊 Lihat Pengeluaran</b> untuk buka dashboard\n\n"
-    "Setiap catatan selalu kutanya dulu kategorinya sebelum disimpan — tidak ada yang tersimpan diam-diam 🙂\n"
+    "📷 Tips foto struk: pencahayaan terang, kamera tegak lurus (jangan miring), dan pastikan baris TOTAL/JUMLAH "
+    "ikut kefoto &amp; tidak buram — makin jelas fotonya, makin akurat aku membacanya.\n\n"
+    "Kalau bukan struk yang kubaca sendiri, aku selalu tanya dulu kategorinya sebelum disimpan — tidak ada yang "
+    "tersimpan diam-diam tanpa bisa dikoreksi 🙂\n"
     "Laporan harian kukirim tiap 23.00 WIB, rekap mingguan tiap Minggu malam, bulanan di akhir bulan, "
     "dan ringkasan tahunan tiap tahun baru 🎉")
 START_GUEST = (
@@ -42,7 +46,8 @@ START_GUEST = (
 GUEST_REPLY = "Di sini aku cuma bisa membantu lewat aplikasi ya 🙂 Pesan di chat tidak kusimpan. Tekan tombol di bawah untuk mencatat."
 NO_AMOUNT = "Hmm, aku belum menemukan nominalnya 🙈\nContoh: <code>50000 kopi</code>, <code>bensin 100rb</code>, <code>gaji 7,5jt</code>"
 MANUAL = "ketik manual: <code>87500 indomaret</code>"
-KURANG_JELAS = "Maaf, struknya kurang jelas 🙏 Coba foto lebih dekat &amp; terang, atau " + MANUAL
+KURANG_JELAS = ("Maaf, struknya kurang jelas 🙏 Tips: foto tegak lurus (jangan miring), pencahayaan terang, dan "
+                 "pastikan baris TOTAL/JUMLAH ikut kefoto &amp; tidak buram. Coba lagi, atau " + MANUAL)
 KELAMAAN = "Maaf, struknya kelamaan dibaca (lebih dari 30 detik) 🙏 Coba foto yang lebih kecil &amp; jelas, atau " + MANUAL
 BUSY = "Sedang membaca struk lain, tunggu sebentar ya ⏳"
 TOO_BIG = "Fotonya terlalu besar (maks 5 MB) atau bukan gambar. Kirim sebagai foto biasa ya 📷"
@@ -127,12 +132,16 @@ def after_amount(uid, d):
 
 
 def save(uid, d):
-    tx = db.add_tx({**d, "catatan": d["catatan"] or d["subkategori"]})
+    patch = {**d, "catatan": d["catatan"] or d["subkategori"]}
+    tx = db.update_tx(d["edit_id"], patch) if d.get("edit_id") else db.add_tx(patch)
     drafts.pop(uid, None)
+    if tx is None:  # edit_id no longer exists (e.g. deleted via Undo while the edit was in progress)
+        return tg.tg_edit(uid, d["msg_id"], "Yah, transaksi ini sudah tidak ada / sudah dihapus 🙏", [])
     today = wib().date()
     hari = report.sums(today.isoformat(), today.isoformat())[1]
     bulan = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
-    text = (f"✅ Tersimpan! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])} · "
+    verb = "Diperbarui" if d.get("edit_id") else "Tersimpan"
+    text = (f"✅ {verb}! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])} · "
             f"{esc(tx['kategori'])} › {esc(tx['subkategori'])}\n📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}")
     tg.tg_edit(uid, d["msg_id"], text, [[{"text": "↩️ Hapus catatan ini", "callback_data": f"d:{tx['id']}"}]] + DASH)
 
@@ -152,8 +161,10 @@ def on_text(uid, text):
     else:
         fixed = bool(d and d["fixed"])  # jenis chosen via j:* or 🔁 sticks across retypes; a guessed one is re-guessed
         jenis = d["jenis"] if fixed else p["jenis"]
+        live = bool(d and d["step"] in CARD)  # a live card keeps its message + edit target across a retype (incl. mid-edit)
         d = {**EMPTY, "jenis": jenis, "fixed": fixed, "jumlah": p["jumlah"], "catatan": p["catatan"], "tanggal": p["tanggal"],
-             "waktu": t.strftime("%H:%M"), "multiple": p["multiple"], "msg_id": d["msg_id"] if d and d["step"] in CARD else None,
+             "waktu": t.strftime("%H:%M"), "multiple": p["multiple"], "msg_id": d["msg_id"] if live else None,
+             "edit_id": d["edit_id"] if live else None, "sumber": d["sumber"] if live and d["edit_id"] else "teks",
              "guess": (p["kategori"], p["subkategori"]) if jenis == p["jenis"] else parse.guess_kategori(p["catatan"], jenis)}
     if p["ambiguous"]:
         n = p["jumlah"]
@@ -175,8 +186,33 @@ def read_receipt(uid, mid, file_id):
         report.alert_error(e)
 
 
+def tx_buttons(tx):
+    """↩️ Undo / ✏️ Ubah kategori / 🔁 flip row for an already-saved transaction (autosaved, or an edit just cancelled)."""
+    flip = "🔁 Jadikan Pengeluaran" if tx["jenis"] == "masuk" else "🔁 Jadikan Pemasukan"
+    return [[{"text": "↩️ Undo", "callback_data": f"d:{tx['id']}"}],
+            [{"text": "✏️ Ubah kategori", "callback_data": f"ek:{tx['id']}"}, {"text": flip, "callback_data": f"et:{tx['id']}"}]] + DASH
+
+
+def autosave_receipt(uid, mid, r):
+    """A clearly-read receipt with a definite category is saved right away — with an instant Undo/Ubah, not silently."""
+    tx = db.add_tx({"jenis": r["jenis"], "jumlah": r["jumlah"], "kategori": r["kategori"], "subkategori": r["subkategori"],
+                     "catatan": r["catatan"], "tanggal": r["tanggal"], "waktu": r["waktu"], "sumber": "struk"})
+    today = wib().date()
+    hari = report.sums(today.isoformat(), today.isoformat())[1]
+    bulan = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
+    text = (f"✅ Tersimpan otomatis dari struk! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])}\n"
+            f"📂 {esc(tx['kategori'])} › {esc(tx['subkategori'])}\n🏪 {esc(tx['catatan'])}\n"
+            f"📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}")
+    buttons = tx_buttons(tx)
+    try:
+        tg.tg_edit(uid, mid, text, buttons)
+    except Exception as e:  # the tx is already committed — never let this be reinterpreted as an OCR-read failure
+        log.warning("konfirmasi autosave gagal, kirim baru: %s", e)
+        tg.tg_send(uid, text, buttons=buttons)
+
+
 def receipt_card(uid, mid, file_id):
-    """Download → ocr.run (serialized inside) → parse_receipt → draft → card."""
+    """Download → ocr.run (serialized inside) → parse_receipt → autosave (confident + known category) or draft card."""
     try:
         lines = ocr.run(tg.tg_get_file(file_id, MAX_PHOTO))
     except ocr.Busy:
@@ -189,14 +225,19 @@ def receipt_card(uid, mid, file_id):
         log.warning("OCR gagal: %s", e)
         lines = []
     r = parse.parse_receipt(lines, wib().date())
-    d = {**EMPTY, "jumlah": r["jumlah"], "catatan": r["catatan"], "tanggal": r["tanggal"], "waktu": r["waktu"], "sumber": "struk",
-         "guess": (r["kategori"], r["subkategori"]), "msg_id": mid}
+    d = {**EMPTY, "jenis": r["jenis"], "jumlah": r["jumlah"], "catatan": r["catatan"], "tanggal": r["tanggal"], "waktu": r["waktu"],
+         "sumber": "struk", "guess": (r["kategori"], r["subkategori"]), "msg_id": mid}
     if r["jumlah"] is None:
         return show(uid, d, ASK_JUMLAH, KURANG_JELAS, [[BATAL]])
+    if r["confidence"] == "high" and r["kategori"]:
+        return autosave_receipt(uid, mid, r)
+    label = "💚 Pemasukan" if r["jenis"] == "masuk" else "❤️ Pengeluaran"
+    flip = "🔁 Jadikan Pengeluaran" if r["jenis"] == "masuk" else "🔁 Jadikan Pemasukan"
     text = (("⚠️ Aku kurang yakin dengan totalnya, cek dulu ya.\n" if r["confidence"] == "low" else "")
-            + f"📸 Struk terbaca!\n💰 Total: {rp(r['jumlah'])}\n🏪 {esc(r['catatan'])}\n📅 {date.fromisoformat(r['tanggal']):%d/%m/%Y}"
+            + f"📸 Struk terbaca! ({label})\n💰 Total: {rp(r['jumlah'])}\n🏪 {esc(r['catatan'])}\n📅 {date.fromisoformat(r['tanggal']):%d/%m/%Y}"
             + (f" · {r['waktu']}" if r["waktu"] else "") + "\n\nBenar totalnya?")
-    show(uid, d, ASK_JUMLAH, text, [[{"text": "✅ Benar", "callback_data": "ok"}, {"text": "✏️ Ubah nominal", "callback_data": "e:j"}], [BATAL]])
+    show(uid, d, ASK_JUMLAH, text, [[{"text": "✅ Benar", "callback_data": "ok"}, {"text": "✏️ Ubah nominal", "callback_data": "e:j"}],
+                                    [{"text": flip, "callback_data": "e:t"}], [BATAL]])
 
 
 def on_photo(uid, msg, file):
@@ -250,6 +291,19 @@ def on_command(uid, msg, cmd):
         tg.tg_send_document(uid, report.backup(), "🗄️ Backup database Finn Finn — simpan baik-baik ya.")
     elif cmd == "/pengingat":
         tg.tg_send(uid, OWNER_REMIND)
+    elif cmd == "/budgetbaru":
+        set_budget(uid, (msg.get("text") or "").partition(" ")[2].strip())
+
+
+def set_budget(uid, text):
+    amt = parse.parse_amount(text) if text else None
+    if not amt or amt["jumlah"] is None or amt["error"]:
+        return tg.tg_send(uid, "Ketik nominal budget bulananmu ya, contoh: <code>/budgetbaru 3000000</code>")
+    if amt["ambiguous"]:
+        return tg.tg_send(uid, f"Maksudnya {rp(amt['jumlah'])} atau {rp(amt['jumlah'] * 1000)}? Tulis lengkap ya, misalnya "
+                               f"<code>/budgetbaru {amt['jumlah']}rb</code> atau <code>/budgetbaru {amt['jumlah'] * 1000}</code>.")
+    db.meta_set("budget_bulanan", str(amt["jumlah"]))
+    tg.tg_send(uid, f"🎯 Budget bulanan diset: {rp(amt['jumlah'])}. Aku hitung sisa kuota harianmu tiap laporan ya 😉")
 
 
 def remind_toggle(uid, on):
@@ -293,6 +347,21 @@ def on_callback(cb):
         tg.tg_answer_cb(cid)
         db.delete_tx(int(arg))
         return tg.tg_edit(uid, mid, "Dihapus 🗑 Catatan dibatalkan.")
+    if key in ("ek", "et") and arg.isdigit():
+        live = draft(uid)
+        if live and live["msg_id"] != mid:  # a different entry is already mid-flow: never silently discard it
+            return tg.tg_answer_cb(cid, "Selesaikan atau batalkan dulu catatan yang sedang berjalan ya 🙏")
+        tg.tg_answer_cb(cid)
+        tx = db.get_tx(int(arg))
+        if not tx:
+            return
+        jenis = ("masuk" if tx["jenis"] == "keluar" else "keluar") if key == "et" else tx["jenis"]
+        guess = tx["kategori"], tx["subkategori"]
+        if key == "et":
+            guess = parse.guess_kategori(tx["catatan"], jenis)
+        d = {**EMPTY, "jenis": jenis, "jumlah": tx["jumlah"], "catatan": tx["catatan"], "tanggal": tx["tanggal"],
+             "waktu": tx["waktu"], "sumber": tx["sumber"], "edit_id": tx["id"], "guess": guess, "msg_id": mid}
+        return pick_kategori(uid, d)
     d = draft(uid)
     if not d or d["msg_id"] != mid:
         tg.tg_answer_cb(cid, STALE)
@@ -300,6 +369,9 @@ def on_callback(cb):
     tg.tg_answer_cb(cid)
     if key == "x":
         drafts.pop(uid, None)
+        tx = db.get_tx(d["edit_id"]) if d.get("edit_id") else None
+        if tx:  # editing an already-saved tx: it's untouched, not "cancelled" — restore its Undo/Ubah/flip row
+            return tg.tg_edit(uid, mid, "Oke, perubahan dibatalkan — transaksinya tetap tersimpan seperti semula.", tx_buttons(tx))
         tg.tg_edit(uid, mid, "Oke, dibatalkan. Kapan pun siap, ketik lagi ya 🙂")
     elif key == "j":
         d["jenis"], d["fixed"] = ("masuk" if arg == "m" else "keluar"), True

@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { guessJenis, guessKategori, parseAmount, parseReceipt, parseText } from '../web/parse.js';
+import { guessJenis, guessJenisStruk, guessKategori, parseAmount, parseReceipt, parseText } from '../web/parse.js';
 
 const TODAY = '2026-09-06';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -112,6 +112,18 @@ for (const f of fixtures) {
   for (const [k, v] of Object.entries(exp)) {
     if (k !== 'today') check(`fixture ${f} ${k}`, got[k === 'merchant' ? 'catatan' : k], v);
   }
+  check(`fixture ${f} jenis`, got.jenis, 'keluar');
+}
+check('guessJenisStruk terima kasih', guessJenisStruk('TERIMA KASIH ATAS KUNJUNGAN ANDA'), 'keluar');
+// an INVOICE line + a LUNAS paid-stamp alone is normal on ordinary purchase receipts too — must not flip to masuk
+check('guessJenisStruk invoice lunas alone', guessJenisStruk('NO. INVOICE: 1234567\nSTATUS: LUNAS\nTOTAL 87.500'), 'keluar');
+for (const text of ['BUKTI TRANSFER\nTransfer Masuk\nDari: PT Contoh\nTOTAL 5.000.000', 'Slip Gaji Bulan September\nGaji Pokok 7.500.000',
+                    'Pembayaran Diterima\nInvoice #123 Lunas\nRp 1.200.000']) {
+  check(`guessJenisStruk masuk ${JSON.stringify(text)}`, guessJenisStruk(text), 'masuk');
+}
+{
+  const r = parseReceipt(['BUKTI TRANSFER', 'Transfer Masuk', 'Dari: PT Contoh', 'TOTAL 5.000.000'], TODAY);
+  check('receipt income proof', [r.jenis, r.jumlah], ['masuk', 5000000]);
 }
 {
   const r = parseReceipt(['', '   '], TODAY);

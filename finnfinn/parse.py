@@ -148,6 +148,15 @@ BRANDS = [(re.compile(r"\b(?:%s)" % p, re.I), n) for p, n in (
     ("indihome", "IndiHome"), ("apotek", "Apotek"), ("kimia farma", "Kimia Farma"), ("guardian", "Guardian"),
     ("gramedia", "Gramedia"))]
 NOT_MERCHANT = re.compile(r"jl\.|jalan|telp|tel\.|npwp|no\.|struk|receipt|nota|faktur|kasir|tanggal|date", re.I)
+# Strong income-only phrases — NOT the generic guess_jenis()/MASUK_RE, whose "terima" would false-positive on
+# every purchase receipt's "Terima Kasih" footer.
+MASUK_STRUK = re.compile(
+    r"transfer\s*masuk|dana\s*masuk|uang\s*masuk|saldo\s*(bertambah|masuk)|pembayaran\s*diterima|"
+    r"diterima\s*dari|menerima\s*transfer|terima\s*transfer|slip\s*gaji|struk\s*gaji|bukti\s*(setor|terima)|"
+    # NOT a bare "invoice...lunas": an INVOICE line plus a LUNAS paid-stamp is normal on ordinary purchase
+    # receipts too, so that pairing alone must never flip a real expense to income.
+    r"payment\s*received|received\s*from|top\s*up\s*berhasil|dana\s*diterima|"
+    r"gaji\s*(bulan|diterima)|honorarium|pencairan\s*dana", re.I)
 
 
 def _repair(line):
@@ -214,8 +223,13 @@ def _merchant(lines):
     return "Struk"
 
 
+def guess_jenis_struk(text):
+    """Receipt text → 'masuk' only on a strong income-proof phrase; default 'keluar' (most nota are purchases)."""
+    return "masuk" if MASUK_STRUK.search(text) else "keluar"
+
+
 def parse_receipt(lines, today):
-    """OCR lines top→bottom → {jumlah, confidence ('high'|'low'), tanggal, waktu, catatan, kategori, subkategori}."""
+    """OCR lines top→bottom → {jumlah, confidence ('high'|'low'), tanggal, waktu, catatan, jenis, kategori, subkategori}."""
     lines = [_repair(l.strip()) for l in lines if l.strip()]
     amounts = [_amounts(l) for l in lines]
     best = None
@@ -236,8 +250,10 @@ def parse_receipt(lines, today):
         jumlah, confidence = (max(cands), "low") if cands else (None, "low")
     tanggal, waktu = _find_date(lines, today)
     merchant = _merchant(lines)
-    kategori, sub = guess_kategori(merchant)
+    full = " ".join(lines)
+    jenis = guess_jenis_struk(full)
+    kategori, sub = guess_kategori(merchant, jenis)
     if not kategori:
-        kategori, sub = guess_kategori(" ".join(lines))
+        kategori, sub = guess_kategori(full, jenis)
     return {"jumlah": jumlah, "confidence": confidence, "tanggal": tanggal.isoformat(), "waktu": waktu,
-            "catatan": merchant, "kategori": kategori, "subkategori": sub}
+            "catatan": merchant, "jenis": jenis, "kategori": kategori, "subkategori": sub}

@@ -236,6 +236,20 @@ class BotTest(unittest.TestCase):
         bot.handle_update(msg(OWNER, "/pengingat"))
         self.assertEqual(self.sent[-1][1], "Laporan harianmu selalu aktif tiap 23.00 WIB 📊")
 
+    def test_budgetbaru(self):
+        bot.handle_update(msg(OWNER, "/budgetbaru"))
+        self.assertEqual(self.sent[-1][1], "Ketik nominal budget bulananmu ya, contoh: <code>/budgetbaru 3000000</code>")
+        self.assertIsNone(db.meta_get("budget_bulanan"))
+        bot.handle_update(msg(OWNER, "/budgetbaru 3jt"))
+        self.assertEqual(self.sent[-1][1], "🎯 Budget bulanan diset: Rp 3.000.000. Aku hitung sisa kuota harianmu tiap laporan ya 😉")
+        self.assertEqual(db.meta_get("budget_bulanan"), "3000000")
+
+    def test_budgetbaru_ambiguous_bare_number(self):
+        """A bare number like '500' (meant as '500rb'?) must be disambiguated, not silently stored as Rp 500/month."""
+        bot.handle_update(msg(OWNER, "/budgetbaru 500"))
+        self.assertIn("Maksudnya Rp 500 atau Rp 500.000?", self.sent[-1][1])
+        self.assertIsNone(db.meta_get("budget_bulanan"))
+
     # ---------- guests ----------
 
     def test_guest_throttle_and_no_getfile(self):
@@ -274,15 +288,18 @@ class BotTest(unittest.TestCase):
     # ---------- photos ----------
 
     def test_photo_ok(self):
-        expect = json.loads((FIX / "01.json").read_text())
+        """Low-confidence read (fixture 07): never auto-saved, always confirmed first."""
+        expect = json.loads((FIX / "07.json").read_text())
+        ocr.run = lambda img: (FIX / "07.txt").read_text().splitlines()
         self.photo(OWNER)
         self.assertEqual(self.sent[-1][1], "⏳ Sedang membaca struk…")
         self.assertEqual(self.files, ["big"])
         _, mid, text, buttons = self.last_edit()
         self.assertEqual(mid, self.n)
-        self.assertTrue(text.startswith(f"📸 Struk terbaca!\n💰 Total: {report.rp(expect['jumlah'])}\n🏪 {expect['merchant']}\n📅 "))
+        self.assertTrue(text.startswith(f"⚠️ Aku kurang yakin dengan totalnya, cek dulu ya.\n"
+                                         f"📸 Struk terbaca! (❤️ Pengeluaran)\n💰 Total: {report.rp(expect['jumlah'])}\n🏪 {expect['merchant']}\n📅 "))
         self.assertTrue(text.endswith("\n\nBenar totalnya?"))
-        self.assertEqual([[b["callback_data"] for b in row] for row in buttons], [["ok", "e:j"], ["x"]])
+        self.assertEqual([[b["callback_data"] for b in row] for row in buttons], [["ok", "e:j"], ["e:t"], ["x"]])
         d = bot.drafts[OWNER]
         self.assertEqual((d["step"], d["sumber"], d["jenis"]), (bot.ASK_JUMLAH, "struk", "keluar"))
         bot.handle_update(cb(OWNER, "ok", mid))
@@ -291,6 +308,135 @@ class BotTest(unittest.TestCase):
         self.assertEqual(buttons[0][0]["text"], "✅ Makanan & Minuman")
         bot.handle_update(cb(OWNER, "c:0", mid))
         self.assertEqual(self.last_edit()[3][0][0]["text"], "✅ " + expect["subkategori"])
+
+    def test_photo_autosave_high_confidence(self):
+        """A clear read (fixture 01, confidence high, known category) is saved immediately — Undo/Ubah/flip, not a question."""
+        expect = json.loads((FIX / "01.json").read_text())
+        self.photo(OWNER)
+        _, mid, text, buttons = self.last_edit()
+        self.assertTrue(text.startswith(f"✅ Tersimpan otomatis dari struk! Pengeluaran {report.rp(expect['jumlah'])}\n"
+                                         f"📂 Makanan &amp; Minuman › {expect['subkategori']}\n🏪 {expect['merchant']}\n"))
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["jumlah"], rows[0]["jenis"], rows[0]["sumber"]), (expect["jumlah"], "keluar", "struk"))
+        tx_id = rows[0]["id"]
+        self.assertEqual(buttons[0], [{"text": "↩️ Undo", "callback_data": f"d:{tx_id}"}])
+        self.assertEqual([b["callback_data"] for b in buttons[1]], [f"ek:{tx_id}", f"et:{tx_id}"])
+        self.assertEqual(buttons[2:], report.DASH)
+        ek_cb, et_cb = buttons[1][0]["callback_data"], buttons[1][1]["callback_data"]
+
+        bot.handle_update(cb(OWNER, ek_cb, mid))  # ✏️ Ubah kategori: edit mode, pre-guessed with the current leaf
+        _, _, text, buttons = self.last_edit()
+        self.assertTrue(text.startswith("❤️ <b>Pengeluaran</b>"))
+        self.assertEqual(buttons[0][0]["text"], "✅ Makanan & Minuman")
+        bot.handle_update(cb(OWNER, "c:1", mid))  # Transportasi (n=1 in seed order)
+        bot.handle_update(cb(OWNER, "s:0", mid))
+        bot.handle_update(cb(OWNER, "ok", mid))
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual(len(rows), 1)  # updated in place, not duplicated
+        self.assertEqual(rows[0]["kategori"], "Transportasi")
+        self.assertTrue(self.last_edit()[2].startswith("✅ Diperbarui!"))
+
+    def test_photo_autosave_flip_jenis(self):
+        expect = json.loads((FIX / "01.json").read_text())
+        self.photo(OWNER)
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        mid = self.last_edit()[1]
+        et_cb = self.last_edit()[3][1][1]["callback_data"]
+        self.assertEqual(et_cb, f"et:{rows[0]['id']}")
+        bot.handle_update(cb(OWNER, et_cb, mid))
+        _, _, text, buttons = self.last_edit()
+        self.assertTrue(text.startswith("💚 <b>Pemasukan</b>"))
+        self.assertEqual(buttons[0][0]["text"], "✅ Lainnya")  # no keluar-catatan hits a MASUK_MAP keyword
+        bot.handle_update(cb(OWNER, "c:0", mid))
+        bot.handle_update(cb(OWNER, "ok", mid))
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["jenis"], rows[0]["kategori"], rows[0]["jumlah"]), ("masuk", "Lainnya", expect["jumlah"]))
+
+    def test_edit_mode_free_text_updates_not_duplicates(self):
+        """Free text (not a bare number) typed while an ek:/et: edit is open must update the tx, not add a duplicate."""
+        self.photo(OWNER)
+        _, mid, _, buttons = self.last_edit()
+        tx_id = db.list_tx("2000-01-01", "2100-01-01")[0]["id"]
+        bot.handle_update(cb(OWNER, buttons[1][0]["callback_data"], mid))  # ✏️ Ubah kategori: edit mode
+        bot.handle_update(msg(OWNER, "77000 bensin"))  # free text, not a bare number
+        self.assertEqual(bot.drafts[OWNER]["edit_id"], tx_id)  # used to be silently dropped here
+        bot.handle_update(cb(OWNER, "c:0", mid))
+        bot.handle_update(cb(OWNER, "s:0", mid))
+        bot.handle_update(cb(OWNER, "ok", mid))
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual(len(rows), 1)  # updated in place, never duplicated
+        self.assertEqual((rows[0]["id"], rows[0]["jumlah"], rows[0]["kategori"], rows[0]["catatan"]),
+                         (tx_id, 77000, "Transportasi", "Bensin"))
+        self.assertTrue(self.last_edit()[2].startswith("✅ Diperbarui!"))
+
+    def test_save_edit_target_already_deleted(self):
+        """A duplicate/late Undo landing mid-edit must not crash save() with a bare tx=None indexing error."""
+        self.photo(OWNER)
+        _, mid, _, buttons = self.last_edit()
+        tx_id = db.list_tx("2000-01-01", "2100-01-01")[0]["id"]
+        bot.handle_update(cb(OWNER, buttons[1][0]["callback_data"], mid))
+        db.delete_tx(tx_id)  # e.g. a duplicate Undo delivery landing while the edit is in progress
+        bot.handle_update(cb(OWNER, "c:0", mid))
+        bot.handle_update(cb(OWNER, "s:0", mid))
+        bot.handle_update(cb(OWNER, "ok", mid))  # must not raise
+        self.assertIn("sudah tidak ada", self.last_edit()[2])
+        self.assertEqual(db.list_tx("2000-01-01", "2100-01-01"), [])
+
+    def test_ek_refuses_when_another_draft_is_live(self):
+        """Tapping Ubah/flip on an old autosaved card must never silently discard a separate in-progress draft."""
+        self.photo(OWNER)
+        _, mid_a, _, buttons = self.last_edit()
+        ek_cb = buttons[1][0]["callback_data"]
+        bot.handle_update(msg(OWNER, "50000 kopi"))  # a brand-new, unrelated manual entry, mid-flow
+        mid_b = bot.drafts[OWNER]["msg_id"]
+        bot.handle_update(cb(OWNER, ek_cb, mid_a))
+        self.assertEqual(self.answered[-1], "Selesaikan atau batalkan dulu catatan yang sedang berjalan ya 🙏")
+        self.assertEqual((bot.drafts[OWNER]["msg_id"], bot.drafts[OWNER]["step"]), (mid_b, bot.PICK_KATEGORI))
+
+    def test_cancel_edit_mode_keeps_tx_and_restores_buttons(self):
+        """Cancelling mid-edit must say the tx is untouched, not 'dibatalkan', and restore its Undo/Ubah row."""
+        self.photo(OWNER)
+        _, mid, _, buttons = self.last_edit()
+        tx_id = db.list_tx("2000-01-01", "2100-01-01")[0]["id"]
+        bot.handle_update(cb(OWNER, buttons[1][0]["callback_data"], mid))
+        bot.handle_update(cb(OWNER, "x", mid))
+        _, _, text, buttons2 = self.last_edit()
+        self.assertEqual(text, "Oke, perubahan dibatalkan — transaksinya tetap tersimpan seperti semula.")
+        self.assertEqual(buttons2[0], [{"text": "↩️ Undo", "callback_data": f"d:{tx_id}"}])
+        self.assertEqual([b["callback_data"] for b in buttons2[1]], [f"ek:{tx_id}", f"et:{tx_id}"])
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual((len(rows), rows[0]["id"]), (1, tx_id))
+        self.assertNotIn(OWNER, bot.drafts)
+
+    def test_autosave_confirmation_edit_failure_falls_back_to_send(self):
+        """A transient failure editing the autosave-confirmation card must fall back to tg_send, not read as an OCR failure."""
+        calls = []
+
+        def edit(chat_id, msg_id, text=None, buttons=None, parse_mode="HTML"):
+            calls.append(text)
+            raise RuntimeError("Bad Gateway")
+        tg.tg_edit = edit
+        self.photo(OWNER)
+        rows = db.list_tx("2000-01-01", "2100-01-01")
+        self.assertEqual(len(rows), 1)  # already committed regardless of the edit failure
+        self.assertEqual(len(calls), 1)  # the failed edit attempt, never retried as KURANG_JELAS
+        self.assertTrue(self.sent[-1][1].startswith("✅ Tersimpan otomatis dari struk!"))
+        self.assertEqual(self.sent[-1][2][0], [{"text": "↩️ Undo", "callback_data": f"d:{rows[0]['id']}"}])
+        self.assertFalse(any(t == bot.KURANG_JELAS for _, t, _ in self.sent))
+
+    def test_photo_jenis_detection_masuk(self):
+        ocr.run = lambda img: ["BUKTI TRANSFER", "PT BANK CONTOH", "Transfer Masuk", "Dari: Kantor ABC", "Jumlah",
+                               "TOTAL 5.000.000", "06/09/2026 09:00", "Berhasil"]
+        self.photo(OWNER)
+        d = bot.drafts.get(OWNER)
+        if d:  # not autosaved (no MASUK_MAP keyword match on the merchant/full text) → confirm card still shows jenis
+            self.assertEqual(d["jenis"], "masuk")
+            self.assertIn("💚 Pemasukan", self.last_edit()[2])
+        else:  # autosaved straight to Lainnya/Umum
+            rows = db.list_tx("2000-01-01", "2100-01-01")
+            self.assertEqual(rows[0]["jenis"], "masuk")
 
     def test_photo_errors(self):
         for exc, copy in ((ocr.Busy(), bot.BUSY), (TimeoutError(), bot.KELAMAAN), (ValueError("bukan gambar"), bot.TOO_BIG),

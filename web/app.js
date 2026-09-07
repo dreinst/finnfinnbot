@@ -398,7 +398,7 @@ async function scan(e) {
     $('catatan').value = r.catatan;
     $('tanggal').value = r.tanggal;
     if (r.waktu) $('waktu').value = r.waktu;
-    S.jenis = 'keluar';
+    S.jenis = r.jenis || 'keluar';
     S.sumber = 'struk';
     if (r.kategori) { S.kat = r.kategori; S.sub = r.subkategori; }
     drawSheet();
@@ -518,7 +518,16 @@ async function boot() {
   }
   const name = me.nama || tgUser.first_name || 'Kamu';
   $('greet').textContent = `Halo, ${name}! 👋`;
-  if (tgUser.photo_url) { $('avatar').src = tgUser.photo_url; $('avatar').hidden = false; $('avatar-initials').hidden = true; }
+  // initData's own photo_url is often empty on real devices — ask the server (which proxies the Bot API) first.
+  let gotPhoto = false;
+  if (tg && tg.initData) {
+    try {
+      const res = await fetch('/api/avatar', { headers: { Authorization: 'tma ' + tg.initData } });
+      if (res.ok) { $('avatar').src = URL.createObjectURL(await res.blob()); gotPhoto = true; }
+    } catch { /* fall back below */ }
+  }
+  if (!gotPhoto && tgUser.photo_url) { $('avatar').src = tgUser.photo_url; gotPhoto = true; }
+  if (gotPhoto) { $('avatar').hidden = false; $('avatar-initials').hidden = true; }
   else $('avatar-initials').textContent = (name[0] + (tgUser.last_name || '')[0]).toUpperCase().replace('UNDEFINED', '');
   try {
     await store.init();

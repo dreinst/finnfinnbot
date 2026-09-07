@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from finnfinn.parse import guess_jenis, guess_kategori, parse_amount, parse_receipt, parse_text
+from finnfinn.parse import guess_jenis, guess_jenis_struk, guess_kategori, parse_amount, parse_receipt, parse_text
 
 TODAY = date(2026, 9, 6)
 FIX = Path(__file__).parent / "fixtures" / "receipts"
@@ -173,6 +173,27 @@ class ReceiptTest(unittest.TestCase):
     def test_empty(self):
         r = parse_receipt(["", "   "], TODAY)
         self.assertEqual((r["jumlah"], r["confidence"], r["tanggal"], r["catatan"]), (None, "low", "2026-09-06", "Struk"))
+
+    def test_jenis_purchase_receipts_stay_keluar(self):
+        for j in sorted(FIX.glob("*.json")):
+            lines = j.with_suffix(".txt").read_text(encoding="utf-8").splitlines()
+            with self.subTest(fixture=j.stem):
+                self.assertEqual(parse_receipt(lines, TODAY)["jenis"], "keluar")
+        self.assertEqual(guess_jenis_struk("TERIMA KASIH ATAS KUNJUNGAN ANDA"), "keluar")  # a bare "terima" must not flip it
+
+    def test_jenis_invoice_lunas_alone_stays_keluar(self):
+        """An INVOICE line + a LUNAS paid-stamp is normal on ordinary purchase receipts too — must not flip to masuk."""
+        self.assertEqual(guess_jenis_struk("NO. INVOICE: 1234567\nSTATUS: LUNAS\nTOTAL 87.500"), "keluar")
+        r = parse_receipt(["TOKO MAJU", "NO. INVOICE: 1234567", "STATUS: LUNAS", "TOTAL 87.500"], TODAY)
+        self.assertEqual(r["jenis"], "keluar")
+
+    def test_jenis_income_proof_detected(self):
+        for text in ("BUKTI TRANSFER\nTransfer Masuk\nDari: PT Contoh\nTOTAL 5.000.000",
+                     "Slip Gaji Bulan September\nGaji Pokok 7.500.000",
+                     "Pembayaran Diterima\nInvoice #123 Lunas\nRp 1.200.000"):
+            self.assertEqual(guess_jenis_struk(text), "masuk", text)
+        r = parse_receipt(["BUKTI TRANSFER", "Transfer Masuk", "Dari: PT Contoh", "TOTAL 5.000.000"], TODAY)
+        self.assertEqual((r["jenis"], r["jumlah"]), ("masuk", 5000000))
 
     def test_split_column(self):
         r = parse_receipt(["TOKO MAJU", "TOTAL", "45.000", "TUNAI", "50.000"], TODAY)
