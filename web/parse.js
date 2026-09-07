@@ -149,6 +149,18 @@ const BRANDS = [
   ['gramedia', 'Gramedia'],
 ].map(([p, n]) => [new RegExp(String.raw`\b(?:${p})`, 'i'), n]);
 const NOT_MERCHANT = new RegExp(String.raw`jl\.|jalan|telp|tel\.|npwp|no\.|struk|receipt|nota|faktur|kasir|tanggal|date`, 'i');
+// Strong income-only phrases — NOT guessJenis()/MASUK_RE, whose "terima" would false-positive on every
+// purchase receipt's "Terima Kasih" footer.
+// NOT a bare "invoice...lunas": an INVOICE line plus a LUNAS paid-stamp is normal on ordinary purchase
+// receipts too, so that pairing alone must never flip a real expense to income.
+const MASUK_STRUK = new RegExp(String.raw`transfer\s*masuk|dana\s*masuk|uang\s*masuk|saldo\s*(bertambah|masuk)|pembayaran\s*diterima|` +
+  String.raw`diterima\s*dari|menerima\s*transfer|terima\s*transfer|slip\s*gaji|struk\s*gaji|bukti\s*(setor|terima)|` +
+  String.raw`payment\s*received|received\s*from|top\s*up\s*berhasil|dana\s*diterima|` +
+  String.raw`gaji\s*(bulan|diterima)|honorarium|pencairan\s*dana`, 'i');
+
+export function guessJenisStruk(text) {
+  return MASUK_STRUK.test(text) ? 'masuk' : 'keluar';
+}
 
 const title = (s) => s.toLowerCase().replace(/(^|\P{L})(\p{L})/gu, (_, p, c) => p + c.toUpperCase());
 
@@ -233,7 +245,9 @@ export function parseReceipt(rawLines, todayIso) {
   }
   const [tanggal, waktu] = findDate(lines, today);
   const name = merchant(lines);
-  let [kategori, sub] = guessKategori(name);
-  if (!kategori) [kategori, sub] = guessKategori(lines.join(' '));
-  return { jumlah, confidence, tanggal: iso(tanggal), waktu, catatan: name, kategori, subkategori: sub };
+  const full = lines.join(' ');
+  const jenis = guessJenisStruk(full);
+  let [kategori, sub] = guessKategori(name, jenis);
+  if (!kategori) [kategori, sub] = guessKategori(full, jenis);
+  return { jumlah, confidence, tanggal: iso(tanggal), waktu, catatan: name, jenis, kategori, subkategori: sub };
 }

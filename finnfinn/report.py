@@ -1,3 +1,4 @@
+import calendar
 import logging
 import os
 import time
@@ -131,6 +132,20 @@ def _rentang(a, b):
     return f"{left}–{b.day} {BULAN[b.month - 1]} {b.year}"
 
 
+def budget_bulanan():
+    v = db.meta_get("budget_bulanan")
+    return int(v) if v else 0
+
+
+def sisa_kuota_harian(day):
+    """Budget bulanan pro-rated to `day` minus this month's keluar so far; None when no budget is set."""
+    b = budget_bulanan()
+    if not b:
+        return None
+    jatah = b * day.day // calendar.monthrange(day.year, day.month)[1]
+    return jatah - sums(day.replace(day=1).isoformat(), day.isoformat())[1]
+
+
 def build_harian(day):
     """HTML daily report for the WIB date `day`."""
     masuk, keluar, cat, _ = sums(day.isoformat(), day.isoformat())
@@ -142,6 +157,9 @@ def build_harian(day):
     diff = masuk - keluar
     body = (f"💸 Keluar: {rp(keluar)} ({sum(r['n'] for r in cat)} transaksi)\n💰 Masuk: {rp(masuk)}\n"
             f"{'📈' if diff >= 0 else '📉'} Selisih: {rp(diff)}\n")
+    quota = sisa_kuota_harian(day)
+    if quota is not None:
+        body += (f"💡 Sisa Kuota Harianmu: {rp(quota)}\n" if quota >= 0 else f"⚠️ Kuota harianmu sudah lewat {rp(-quota)}\n")
     top = sorted((t for t in db.list_tx(day.isoformat(), day.isoformat()) if t["jenis"] == "keluar"), key=lambda t: -t["jumlah"])[:3]
     if top:
         body += "\nTerbesar hari ini:\n" + "\n".join(
@@ -156,10 +174,15 @@ def build_mingguan(monday):
     sunday = monday + timedelta(6)
     masuk, keluar, cat, day = sums(monday.isoformat(), sunday.isoformat())
     prev = sums((monday - timedelta(7)).isoformat(), (monday - timedelta(1)).isoformat())[1]
+    agg = {}
+    for r in cat:
+        agg[r["kategori"]] = agg.get(r["kategori"], 0) + r["total"]
+    top = max(agg.items(), key=lambda kv: kv[1], default=None)
     return (f"📆 <b>Laporan Mingguan — {_rentang(monday, sunday)}</b>\n💰 Masuk {rp(masuk)} · 💸 Keluar {rp(keluar)}\n{_saldo(masuk, keluar)}\n\n"
             + _bars("Traffic harian (keluar)", [(HARI[i], day.get((monday + timedelta(i)).isoformat(), 0)) for i in range(7)])
             + ("\nPer kategori:\n" + "\n".join(_per_kat(cat, keluar)) if cat else "")
-            + f"\n\n{_vs('minggu lalu', keluar, prev)}")
+            + f"\n\n{_vs('minggu lalu', keluar, prev)}"
+            + (f"\n💡 Tip Mingguan: Coba kurangi pengeluaran di sektor {esc(top[0])} untuk minggu depan, ya!" if top else ""))
 
 
 def build_bulanan(year, month):
@@ -179,7 +202,9 @@ def build_bulanan(year, month):
             + _bars("Traffic mingguan (keluar)", weeks)
             + ("\nTop 5 sub-kategori:\n" + "\n".join(subs) if subs else "")
             + (f"\n🔥 Hari terboros: {tanggal(date.fromisoformat(boros[0]), year=False)} ({rp(boros[1])})" if boros else "")
-            + f"\n\n{_vs('bulan lalu', keluar, prev)}")
+            + f"\n\n{_vs('bulan lalu', keluar, prev)}"
+            + f"\n\n🏦 Disisihkan (Tabungan/Investasi): {rp(max(0, masuk - keluar))}"
+            + "\n📣 Siap merencanakan budget bulan depan? Ketik <code>/budgetbaru [nominal]</code> untuk mulai!")
 
 
 def build_tahunan(year):

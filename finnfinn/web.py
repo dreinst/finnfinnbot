@@ -13,7 +13,7 @@ import urllib.parse
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import bot, config, db, report
+from . import bot, config, db, report, tg
 
 log = logging.getLogger("finnfinn.web")
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -167,6 +167,18 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "db": "ok", "last_tick": db.meta_get("last_tick"),
                          "ticker": "ok" if time.monotonic() - report.last_tick < 300 else "stale", "poll": bot.poll_status})
 
+    def _avatar(self, user_id):
+        """Proxy the user's real Telegram profile photo (never the bot token) so <img> can show it without initData headers."""
+        try:
+            file_id = tg.tg_user_photo(user_id)
+            data = tg.tg_get_file(file_id, 512 * 1024) if file_id else None
+        except Exception as e:
+            log.warning("ambil foto profil gagal: %s", e)
+            data = None
+        if not data:
+            return self._json(404, {"error": "tidak ada foto"})
+        self._send(200, data, "image/jpeg", "private, max-age=3600")
+
     def _user(self):
         """Authenticated Telegram user dict, or None after the 401/429 response was sent."""
         auth = self.headers.get("Authorization", "")
@@ -221,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
                     db.guest_set_remind(u["id"], False)
                 return self._json(200, {"ok": True})
             return self._json(200, {"ok": True} if db.guest_set_remind(u["id"], True) else {"ok": False, "reason": "start"})
+        if path == "/api/avatar" and method == "GET":
+            return self._avatar(u["id"])
         if not owner:
             return self._json(403, {"error": "khusus owner"})
         if path == "/api/tx" and method == "GET":

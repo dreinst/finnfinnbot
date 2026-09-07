@@ -102,6 +102,12 @@ def tg_get_file(file_id, max_bytes):
     return data
 
 
+def tg_user_photo(user_id):
+    """→ file_id of the user's current profile photo (largest size), or None when they have none set."""
+    photos = tg_api("getUserProfilePhotos", {"user_id": user_id, "limit": 1})["result"]["photos"]
+    return max(photos[0], key=lambda p: p["width"])["file_id"] if photos else None
+
+
 def tg_send_document(chat_id, path, caption=""):
     boundary = "----finnfinn" + uuid.uuid4().hex
     fields = {"chat_id": str(chat_id)}
