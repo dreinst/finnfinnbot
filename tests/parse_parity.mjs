@@ -128,6 +128,11 @@ for (const f of fixtures) {
   check('receipt merchant title', parseReceipt(['WARUNG BU TINI', 'TOTAL 45.000'], TODAY).catatan, 'Warung Bu Tini');
   check('receipt time after colon', parseReceipt(['06/09/2026', 'Jam:19.42', 'TOTAL 45.000'], TODAY).waktu, '');
   check('text date at start', parseText('3/9 kopi 20rb', TODAY).catatan, 'Kopi');
+  // misread TOTAL (tests/test_parse.py test_fallback_skips_hotline_and_receipt_number): hotline / receipt no. never win the fallback
+  const read = (n) => readFileSync(join(FIX, n), 'utf8').split(/\r?\n/);
+  const f2 = parseReceipt(read('02.txt').map((l) => (l === 'TOTAL 82.300' ? 'T0TAL 82.300' : l)), TODAY);
+  check('receipt misread total 02', [f2.jumlah, f2.confidence], [82300, 'low']);
+  check('receipt misread total 01', parseReceipt(read('01.txt').map((l) => (l === 'TOTAL : 87.500' ? 'T0TAL : 87.500' : l)), TODAY).jumlah !== 1234567, true);
 }
 
 // iOS/Safari < 16.4 floor: no regex lookbehind, no logical-assignment operators anywhere in the Mini App
