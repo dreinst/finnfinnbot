@@ -201,11 +201,11 @@ export class CloudStore {
     const [key, rows] = await this.locate(id);
     const i = rows.findIndex((r) => r[0] === id);
     const tx = { ...this.rowToTx(rows[i]), ...patch, id };
-    if (tx.tanggal.slice(0, 7).replace('-', '') !== key.split('_')[1]) { // moved to another month → its chunk
-      await this.writeRows(key, rows.filter((_, j) => j !== i));
+    rows[i] = this.txToRow(tx);
+    if (tx.tanggal.slice(0, 7).replace('-', '') !== key.split('_')[1] || enc.encode(JSON.stringify(rows)).length > SEAL_BYTES) {
+      await this.writeRows(key, rows.filter((_, j) => j !== i)); // another month, or the chunk would outgrow its seal → re-append
       return this.append(tx);
     }
-    rows[i] = this.txToRow(tx);
     await this.writeRows(key, rows);
     return tx;
   }

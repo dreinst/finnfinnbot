@@ -5,7 +5,7 @@ const CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.
 let loading = null, worker = null;
 
 function loadScript() {
-  loading ||= new Promise((res, rej) => {
+  if (!loading) loading = new Promise((res, rej) => {
     if (window.Tesseract) return res();
     const s = document.createElement('script');
     s.src = CDN;
@@ -16,8 +16,8 @@ function loadScript() {
   return loading;
 }
 
-async function toCanvas(file) { // EXIF-upright, long side ≤ 1600 px, grayscale
-  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+async function toCanvas(file) { // EXIF-upright (the default; the option name is rejected by older WebKit), long side ≤ 1600 px, grayscale
+  const bmp = await createImageBitmap(file);
   const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k);
