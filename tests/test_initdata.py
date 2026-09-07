@@ -5,7 +5,7 @@ import time
 import unittest
 from urllib.parse import urlencode
 
-from finnfinn.web import validate_init_data
+from finnfinn.web import dev_bypass_allowed, validate_init_data
 
 TOKEN = "123456:FAKE-token-for-tests"
 OWNERS = {705153966}
@@ -56,6 +56,23 @@ class InitDataTest(unittest.TestCase):
         self.assertIsNone(validate_init_data(build(1), TOKEN))
         self.assertIsNone(validate_init_data(build([]), TOKEN))
         self.assertIsNone(validate_init_data(build({"id": "705153966"}), TOKEN))
+
+
+class DevBypassTest(unittest.TestCase):
+    def test_local_peer_and_localhost_host(self):
+        for peer in ("127.0.0.1", "172.17.0.1", "192.168.65.1", "10.0.0.7", "::1"):
+            for host in ("localhost", "localhost:8080", "127.0.0.1", "127.0.0.1:8080", "LOCALHOST:8080"):
+                with self.subTest(peer=peer, host=host):
+                    self.assertTrue(dev_bypass_allowed(peer, host))
+
+    def test_refused(self):
+        self.assertFalse(dev_bypass_allowed("8.8.8.8", "localhost"))
+        self.assertFalse(dev_bypass_allowed("172.17.0.1", "finnfinn.example"))
+        self.assertFalse(dev_bypass_allowed("127.0.0.1", "finnfinn.187.53.129.205.sslip.io"))
+        self.assertFalse(dev_bypass_allowed("127.0.0.1", "localhost.evil.com"))
+        self.assertFalse(dev_bypass_allowed("127.0.0.1", "127.0.0.1.evil.com"))
+        self.assertFalse(dev_bypass_allowed("127.0.0.1", ""))
+        self.assertFalse(dev_bypass_allowed("garbage", "localhost"))
 
 
 if __name__ == "__main__":
