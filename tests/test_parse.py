@@ -160,6 +160,16 @@ class ReceiptTest(unittest.TestCase):
                 for k, v in exp.items():
                     self.assertEqual(got["catatan" if k == "merchant" else k], v, k)
 
+    def test_fallback_skips_hotline_and_receipt_number(self):
+        lines = (FIX / "02.txt").read_text(encoding="utf-8").splitlines()
+        lines = ["T0TAL 82.300" if l == "TOTAL 82.300" else l for l in lines]
+        self.assertIn("Layanan Konsumen 1500959", lines)
+        r = parse_receipt(lines, TODAY)
+        self.assertEqual((r["jumlah"], r["confidence"]), (82300, "low"))
+        lines = (FIX / "01.txt").read_text(encoding="utf-8").splitlines()
+        lines = ["T0TAL : 87.500" if l == "TOTAL : 87.500" else l for l in lines]
+        self.assertNotEqual(parse_receipt(lines, TODAY)["jumlah"], 1234567)
+
     def test_empty(self):
         r = parse_receipt(["", "   "], TODAY)
         self.assertEqual((r["jumlah"], r["confidence"], r["tanggal"], r["catatan"]), (None, "low", "2026-09-06", "Struk"))

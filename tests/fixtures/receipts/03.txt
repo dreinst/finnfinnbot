@@ -1,7 +1,7 @@
-Warung Bu Tini
-Nasi Pecel 2 15ooo
-Es teh 2 6ooo
-Tempe 3 4.5oo
-Kerupuk 2ooo
-Jumlah 27.5OO
+Warung Bu Tiní
+Nasi Pecel 2 15000
+Es teh 26000
+Tempe 3 4.500
+Kerupuk 2000
+Jumlah 27.500
 Lunas 6/9/26
