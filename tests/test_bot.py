@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 from finnfinn import bot, config, db, ocr, report, tg
@@ -39,8 +40,8 @@ class BotTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         db.init(os.path.join(self.tmp.name, "t.db"))
         self.saved = (config.OWNER_IDS, config.FIRST_OWNER, config.OCR_ENABLED, tg.tg_send, tg.tg_edit, tg.tg_answer_cb,
-                      tg.tg_get_file, tg.tg_send_document, ocr.run)
-        config.OWNER_IDS, config.FIRST_OWNER, config.OCR_ENABLED = {OWNER}, OWNER, True
+                      tg.tg_get_file, tg.tg_send_document, ocr.run, report._alert_at)
+        config.OWNER_IDS, config.FIRST_OWNER, config.OCR_ENABLED, report._alert_at = {OWNER}, OWNER, True, None
         self.sent, self.edited, self.answered, self.files, self.n = [], [], [], [], 100
         tg.tg_send = self.send
         tg.tg_edit = lambda chat_id, msg_id, text=None, buttons=None, parse_mode="HTML": self.edited.append((chat_id, msg_id, text, buttons))
@@ -52,7 +53,7 @@ class BotTest(unittest.TestCase):
 
     def tearDown(self):
         (config.OWNER_IDS, config.FIRST_OWNER, config.OCR_ENABLED, tg.tg_send, tg.tg_edit, tg.tg_answer_cb,
-         tg.tg_get_file, tg.tg_send_document, ocr.run) = self.saved
+         tg.tg_get_file, tg.tg_send_document, ocr.run, report._alert_at) = self.saved
         db.close()
         self.tmp.cleanup()
 
@@ -85,6 +86,7 @@ class BotTest(unittest.TestCase):
         chat, text, buttons = self.sent[-1]
         self.assertEqual(chat, GUEST)
         self.assertTrue(text.startswith("Halo Donny &lt;3! 👋 Aku <b>Finn Finn</b>.\nUntuk kamu, semua catatan disimpan <b>di akun Telegram-mu sendiri</b>"))
+        self.assertTrue(text.endswith("lewat aplikasi di bawah ini 👇" + report.LINK))  # http WEBAPP_URL: plain link, no web_app button
         self.assertEqual(buttons[-1], [{"text": "🔔 Ingatkan aku tiap malam (23.00 WIB)", "callback_data": "r:1"}])
         self.assertTrue(db.guest_known(GUEST))
         self.assertEqual(db.guests_to_remind(), [])
@@ -135,11 +137,20 @@ class BotTest(unittest.TestCase):
         self.assertEqual(m, mid)
         self.assertTrue(text.startswith("❤️ <b>Pengeluaran</b> Rp 60.000 — <i>Bensin</i>\n"))
         self.assertEqual(buttons[0][0]["text"], "✅ Transportasi")
+        bot.handle_update(msg(OWNER, "gaji 7.500.000"))  # a guessed jenis is re-guessed on retype
+        _, m, text, buttons = self.last_edit()
+        self.assertEqual(m, mid)
+        self.assertTrue(text.startswith("💚 <b>Pemasukan</b> Rp 7.500.000 — <i>Gaji</i>\n"))
+        self.assertEqual(buttons[0][0]["text"], "✅ Gaji")
         bot.handle_update(cb(OWNER, "e:t", mid))
         _, _, text, buttons = self.last_edit()
-        self.assertTrue(text.startswith("💚 <b>Pemasukan</b> Rp 60.000 — <i>Bensin</i>\n"))
-        self.assertEqual(buttons[0][0]["text"], "✅ Lainnya")
-        self.assertEqual(buttons[-1][0]["text"], "🔁 Jadikan Pengeluaran")
+        self.assertTrue(text.startswith("❤️ <b>Pengeluaran</b> Rp 7.500.000 — <i>Gaji</i>\n"))
+        self.assertEqual(buttons[0][0]["text"], "Makanan & Minuman")  # no keluar guess for "gaji": plain seed order
+        self.assertEqual(buttons[-1][0]["text"], "🔁 Jadikan Pemasukan")
+        bot.handle_update(msg(OWNER, "bonus 500rb"))  # 🔁 fixed the jenis: it sticks
+        _, m, text, buttons = self.last_edit()
+        self.assertEqual(m, mid)
+        self.assertTrue(text.startswith("❤️ <b>Pengeluaran</b> Rp 500.000 — <i>Bonus</i>\n"))
         bot.handle_update(cb(OWNER, "x", mid))
         self.assertEqual(self.last_edit()[2], "Oke, dibatalkan. Kapan pun siap, ketik lagi ya 🙂")
         self.assertNotIn(OWNER, bot.drafts)
@@ -190,11 +201,20 @@ class BotTest(unittest.TestCase):
         self.assertEqual(self.last_edit()[2], "❤️ <b>Pengeluaran</b> Rp 50.000\n\n✏️ Ketik nominal barunya ya (contoh: <code>35000</code>)")
         bot.handle_update(msg(OWNER, "35000"))
         self.assertTrue(self.last_edit()[2].startswith("Cek dulu ya 👇\n❤️ <b>Pengeluaran</b> Rp 35.000\n📂 Makanan &amp; Minuman › Makan di luar\n📝 Kopi\n"))
+        today = bot.wib().date()
+        self.assertEqual(bot.drafts[OWNER]["tanggal"], today.isoformat())
+        bot.handle_update(cb(OWNER, "e:j", mid))
+        bot.handle_update(msg(OWNER, "40000 kemarin"))  # a date hint next to the bare number travels with it
+        self.assertEqual((bot.drafts[OWNER]["jumlah"], bot.drafts[OWNER]["tanggal"]), (40000, (today - timedelta(1)).isoformat()))
+        self.assertEqual(bot.drafts[OWNER]["step"], bot.CONFIRM)
 
     def test_stale_callbacks(self):
         bot.handle_update(cb(OWNER, "c:0", 55))
         self.assertEqual(self.answered[-1], "Sesi ini sudah lewat. Ketik ulang catatannya ya 🙂")
         self.assertEqual(self.last_edit(), (OWNER, 55, None, []))
+        for data in ("d:abc", "d:", "a:x"):  # malformed ids never raise
+            bot.handle_update(cb(OWNER, data, 55))
+            self.assertEqual(self.answered[-1], "Sesi ini sudah lewat. Ketik ulang catatannya ya 🙂")
         bot.handle_update(msg(OWNER, "50000 kopi"))
         mid = bot.drafts[OWNER]["msg_id"]
         bot.drafts[OWNER]["ts"] -= 901
@@ -206,13 +226,14 @@ class BotTest(unittest.TestCase):
     def test_lihat_and_reports(self):
         bot.handle_update(msg(OWNER, "📊 Lihat Pengeluaran"))
         _, text, buttons = self.sent[-1]
-        self.assertRegex(text, r"^📊 Hari ini \(\w{3}, \d{1,2} \w{3}\): keluar Rp 0 · masuk Rp 0\nMinggu ini: keluar Rp 0 · Bulan ini: Rp 0\nDashboard-mu siap 👇$")
+        self.assertRegex(text, r"^📊 Hari ini \(\w{3}, \d{1,2} \w{3}\): keluar Rp 0 · masuk Rp 0\nMinggu ini: keluar Rp 0 · Bulan ini: Rp 0\nDashboard-mu siap 👇")
+        self.assertTrue(text.endswith("👇" + report.LINK))
         self.assertEqual(buttons, report.DASH)
         bot.handle_update(msg(OWNER, "/hari"))
         self.assertTrue(self.sent[-1][1].startswith("🌙 <b>Laporan Harian — "))
         bot.handle_update(msg(OWNER, "/minggu"))
         self.assertTrue(self.sent[-1][1].startswith("📆 <b>Laporan Mingguan — "))
-        bot.handle_update(cb(OWNER, "rep:t", 1))
+        bot.handle_update(msg(OWNER, "/tahun"))
         self.assertTrue(self.sent[-1][1].startswith("🎉 <b>Ringkasan Tahunan "))
         bot.handle_update(msg(OWNER, "/pengingat"))
         self.assertEqual(self.sent[-1][1], "Laporan harianmu selalu aktif tiap 23.00 WIB 📊")
@@ -227,10 +248,14 @@ class BotTest(unittest.TestCase):
         self.assertEqual(self.sent[-1][2][-1][0]["callback_data"], "r:1")
         bot.handle_update(msg(GUEST, "lagi"))
         bot.handle_update(msg(GUEST, **PHOTO))
-        self.assertEqual(len(self.sent), 2)  # throttled within 60 s
+        bot.handle_update(msg(GUEST, "/pengingat"))
+        self.assertEqual(len(self.sent), 2)  # throttled within 60 s (/pengingat too; only /start is exempt)
         bot._guest_seen[GUEST] -= 61
         bot.handle_update(msg(GUEST, **PHOTO))
         self.assertEqual(len(self.sent), 3)
+        bot._guest_seen[GUEST] -= 61
+        bot.handle_update(msg(GUEST, "/pengingat"))
+        self.assertEqual(self.sent[-1][1], "Pengingat malam (23.00 WIB) saat ini <b>nonaktif</b>.")
         self.assertEqual(self.files, [])
         self.assertEqual(db.list_tx("2000-01-01", "2100-01-01"), [])
         bot.handle_update(cb(GUEST, "r:1", 9))
@@ -240,7 +265,7 @@ class BotTest(unittest.TestCase):
         self.assertEqual(db.guests_to_remind(), [])
         self.assertEqual(self.sent[-1][1], "🔕 Pengingat dimatikan.")
         bot.handle_update(cb(GUEST, "c:0", 9))  # owner-only callbacks: answered, nothing else
-        self.assertEqual(len(self.sent), 5)
+        self.assertEqual(len(self.sent), 6)
 
     def test_group(self):
         bot.handle_update(msg(OWNER, "/start@finnfinnnn_bot", chat_type="group"))
@@ -294,7 +319,26 @@ class BotTest(unittest.TestCase):
         self.assertEqual(self.sent[-1][1], bot.OFFLINE)
         bot.handle_update(msg(OWNER, document={"file_id": "doc", "mime_type": "image/jpeg", "file_size": 6 * 1024 * 1024}))
         self.assertEqual(self.sent[-1][1], bot.TOO_BIG)
-        self.assertEqual(self.files.count("doc"), 0)
+        bot.handle_update(msg(OWNER, document={"file_id": "pdf", "mime_type": "application/pdf", "file_size": 100}))
+        self.assertEqual(self.sent[-1][1], bot.TOO_BIG)
+        self.assertEqual(self.files.count("doc") + self.files.count("pdf"), 0)
+
+    def test_photo_worker_failure_is_reported(self):
+        calls = []
+
+        def edit(chat_id, msg_id, text=None, buttons=None, parse_mode="HTML"):
+            calls.append(text)
+            if len(calls) == 1:
+                raise RuntimeError("Bad Request: message to edit not found")
+        tg.tg_edit = edit
+
+        def run(img):
+            raise ocr.Busy()
+        ocr.run = run
+        self.photo(OWNER)
+        self.assertEqual(calls, [bot.BUSY, bot.KURANG_JELAS])  # the failed edit is retried once with the fallback copy
+        self.assertTrue(self.sent[-1][1].startswith("⚠️ Finn Finn error: RuntimeError: Bad Request: message to edit not found"))
+        self.assertNotIn(OWNER, bot.drafts)
 
 
 if __name__ == "__main__":
