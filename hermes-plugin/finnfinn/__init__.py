@@ -116,6 +116,57 @@ def finnfinn_ubah_kategori(args, **_):
     return json.dumps({"ok": True, "transaksi": row}, ensure_ascii=False)
 
 
+def finnfinn_kategori(args, **_):
+    """Valid (jenis, kategori, subkategori) leaves — call before finnfinn_catat_transaksi/finnfinn_ubah_kategori
+    if unsure, rather than guessing a category name."""
+    jenis = args.get("jenis")
+    q = "SELECT jenis,kategori,subkategori FROM categories WHERE aktif=1"
+    p = []
+    if jenis in ("masuk", "keluar"):
+        q += " AND jenis=?"
+        p.append(jenis)
+    con = _connect()
+    try:
+        rows = [dict(r) for r in con.execute(q + " ORDER BY jenis, urutan", p)]
+    finally:
+        con.close()
+    return json.dumps({"kategori": rows}, ensure_ascii=False)
+
+
+def finnfinn_catat_transaksi(args, **_):
+    """Record a new transaction directly — the primary path when Hermes reads a receipt photo itself."""
+    jenis = args.get("jenis")
+    jumlah = args.get("jumlah")
+    kategori, sub = (args.get("kategori") or "").strip(), (args.get("subkategori") or "").strip()
+    catatan = (args.get("catatan") or "").strip()[:80]
+    tanggal = args.get("tanggal") or dt.datetime.now(WIB).date().isoformat()
+    waktu = args.get("waktu") or dt.datetime.now(WIB).strftime("%H:%M")
+    if jenis not in ("masuk", "keluar"):
+        return json.dumps({"ok": False, "error": "jenis harus 'masuk' atau 'keluar'"})
+    if not isinstance(jumlah, int) or not 1 <= jumlah <= 100_000_000_000:
+        return json.dumps({"ok": False, "error": "jumlah harus bilangan bulat rupiah, 1 - 100.000.000.000"})
+    if not kategori or not sub:
+        return json.dumps({"ok": False, "error": "kategori dan subkategori wajib diisi (cek finnfinn_kategori)"})
+    try:
+        dt.date.fromisoformat(tanggal)
+    except ValueError:
+        return json.dumps({"ok": False, "error": "tanggal harus format YYYY-MM-DD"})
+    con = _connect()
+    try:
+        leaf = con.execute("SELECT 1 FROM categories WHERE jenis=? AND kategori=? AND subkategori=?",
+                           (jenis, kategori, sub)).fetchone()
+        if not leaf:
+            return json.dumps({"ok": False, "error": f"kategori '{kategori} › {sub}' tidak ada untuk jenis {jenis}. "
+                                                       "Cek daftar valid dengan finnfinn_kategori."})
+        cur = con.execute(
+            "INSERT INTO transactions (jenis,jumlah,kategori,subkategori,catatan,tanggal,waktu,sumber) VALUES (?,?,?,?,?,?,?,?)",
+            (jenis, jumlah, kategori, sub, catatan, tanggal, waktu, "struk"))
+        row = dict(con.execute("SELECT * FROM transactions WHERE id=?", (cur.lastrowid,)).fetchone())
+    finally:
+        con.close()
+    return json.dumps({"ok": True, "transaksi": row}, ensure_ascii=False)
+
+
 def finnfinn_hapus_transaksi(args, **_):
     tx_id = args.get("transaksi_id")
     if not isinstance(tx_id, int):
@@ -168,11 +219,35 @@ HAPUS_SCHEMA = {
     "description": "Hapus satu transaksi Finn Finn yang salah catat/duplikat. Perlu transaksi_id.",
     "parameters": {"type": "object", "properties": {"transaksi_id": {"type": "integer"}}, "required": ["transaksi_id"]}}
 
+KATEGORI_SCHEMA = {
+    "name": "finnfinn_kategori",
+    "description": "Daftar kategori/subkategori Finn Finn yang valid. Panggil ini dulu kalau ragu sebelum "
+                    "finnfinn_catat_transaksi/finnfinn_ubah_kategori — jangan menebak nama kategori.",
+    "parameters": {"type": "object", "properties": {"jenis": {"type": "string", "enum": ["masuk", "keluar"]}}, "required": []}}
+
+CATAT_SCHEMA = {
+    "name": "finnfinn_catat_transaksi",
+    "description": ("Catat transaksi baru di Finn Finn — dipakai terutama saat Owner mengirim foto struk langsung ke "
+                     "Hermes: baca strukanya sendiri (jenis pemasukan/pengeluaran, nominal, tanggal kalau kelihatan), "
+                     "cek kategori valid dengan finnfinn_kategori kalau ragu, lalu panggil tool ini. Juga bisa dipakai "
+                     "untuk transaksi yang disebutkan lewat teks biasa."),
+    "parameters": {"type": "object", "properties": {
+        "jenis": {"type": "string", "enum": ["masuk", "keluar"]},
+        "jumlah": {"type": "integer", "description": "nominal rupiah, bilangan bulat positif"},
+        "kategori": {"type": "string"},
+        "subkategori": {"type": "string"},
+        "catatan": {"type": "string", "description": "nama toko/keterangan singkat, maks 80 karakter"},
+        "tanggal": {"type": "string", "description": "YYYY-MM-DD, opsional (default hari ini WIB)"},
+        "waktu": {"type": "string", "description": "HH:MM, opsional (default sekarang WIB)"}},
+        "required": ["jenis", "jumlah", "kategori", "subkategori"]}}
+
 _TOOLS = (
     ("finnfinn_ringkasan", RINGKASAN_SCHEMA, finnfinn_ringkasan, "💸"),
     ("finnfinn_daftar_transaksi", DAFTAR_SCHEMA, finnfinn_daftar_transaksi, "📋"),
     ("finnfinn_ubah_kategori", UBAH_SCHEMA, finnfinn_ubah_kategori, "✏️"),
     ("finnfinn_hapus_transaksi", HAPUS_SCHEMA, finnfinn_hapus_transaksi, "🗑️"),
+    ("finnfinn_kategori", KATEGORI_SCHEMA, finnfinn_kategori, "🏷️"),
+    ("finnfinn_catat_transaksi", CATAT_SCHEMA, finnfinn_catat_transaksi, "📸"),
 )
 
 
