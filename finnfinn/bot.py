@@ -1,3 +1,4 @@
+import collections
 import json
 import logging
 import threading
@@ -11,12 +12,14 @@ log = logging.getLogger("finnfinn.bot")
 drafts = {}  # uid → {step, jenis, fixed, jumlah, catatan, tanggal, waktu, sumber, kategori, subkategori, guess, cats, subs, msg_id, ts}
 poll_status = "ok"  # "ok" | "conflict" (409 seen on the last getUpdates)
 _guest_seen = {}  # uid → monotonic time of the last canned reply
+_photo_q = collections.deque()  # (uid, mid, file_id) waiting their turn — OCR runs one photo at a time
+_photo_q_lock = threading.Lock()
 TTL = 900
 MAX_PHOTO = 5 * 1024 * 1024
 ASK_JENIS, ASK_INPUT, ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM = "ASK_JENIS", "ASK_INPUT", "ASK_JUMLAH", "PICK_KATEGORI", "PICK_SUB", "CONFIRM"
 CARD = (ASK_JUMLAH, PICK_KATEGORI, PICK_SUB, CONFIRM)  # steps whose message is edited in place by new text
 EMPTY = {"jenis": "keluar", "fixed": False, "jumlah": None, "catatan": "", "tanggal": "", "waktu": "", "sumber": "teks",
-         "kategori": None, "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None, "edit_id": None}
+         "kategori": None, "subkategori": None, "guess": (None, None), "cats": [], "subs": [], "msg_id": None}
 MENU = [["📝 Catat Pengeluaran"], ["📊 Lihat Pengeluaran"]]
 BATAL = {"text": "❌ Batal", "callback_data": "x"}
 GUEST_BUTTONS = BUKA_APP + [[REMIND_ON]]
@@ -132,18 +135,15 @@ def after_amount(uid, d):
 
 
 def save(uid, d):
-    patch = {**d, "catatan": d["catatan"] or d["subkategori"]}
-    tx = db.update_tx(d["edit_id"], patch) if d.get("edit_id") else db.add_tx(patch)
+    tx = db.add_tx({**d, "catatan": d["catatan"] or d["subkategori"]})
     drafts.pop(uid, None)
-    if tx is None:  # edit_id no longer exists (e.g. deleted via Undo while the edit was in progress)
-        return tg.tg_edit(uid, d["msg_id"], "Yah, transaksi ini sudah tidak ada / sudah dihapus 🙏", [])
     today = wib().date()
     hari = report.sums(today.isoformat(), today.isoformat())[1]
     bulan = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
-    verb = "Diperbarui" if d.get("edit_id") else "Tersimpan"
-    text = (f"✅ {verb}! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])} · "
-            f"{esc(tx['kategori'])} › {esc(tx['subkategori'])}\n📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}")
-    tg.tg_edit(uid, d["msg_id"], text, [[{"text": "↩️ Hapus catatan ini", "callback_data": f"d:{tx['id']}"}]] + DASH)
+    text = (f"✅ Tersimpan! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])} · "
+            f"{esc(tx['kategori'])} › {esc(tx['subkategori'])}\n📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}\n"
+            f"Koreksi/hapus lewat Hermes ya kalau perlu 🙂")
+    tg.tg_edit(uid, d["msg_id"], text, [])
 
 
 def on_text(uid, text):
@@ -161,10 +161,9 @@ def on_text(uid, text):
     else:
         fixed = bool(d and d["fixed"])  # jenis chosen via j:* or 🔁 sticks across retypes; a guessed one is re-guessed
         jenis = d["jenis"] if fixed else p["jenis"]
-        live = bool(d and d["step"] in CARD)  # a live card keeps its message + edit target across a retype (incl. mid-edit)
+        live = bool(d and d["step"] in CARD)  # a live card keeps its message across a retype
         d = {**EMPTY, "jenis": jenis, "fixed": fixed, "jumlah": p["jumlah"], "catatan": p["catatan"], "tanggal": p["tanggal"],
              "waktu": t.strftime("%H:%M"), "multiple": p["multiple"], "msg_id": d["msg_id"] if live else None,
-             "edit_id": d["edit_id"] if live else None, "sumber": d["sumber"] if live and d["edit_id"] else "teks",
              "guess": (p["kategori"], p["subkategori"]) if jenis == p["jenis"] else parse.guess_kategori(p["catatan"], jenis)}
     if p["ambiguous"]:
         n = p["jumlah"]
@@ -186,15 +185,8 @@ def read_receipt(uid, mid, file_id):
         report.alert_error(e)
 
 
-def tx_buttons(tx):
-    """↩️ Undo / ✏️ Ubah kategori / 🔁 flip row for an already-saved transaction (autosaved, or an edit just cancelled)."""
-    flip = "🔁 Jadikan Pengeluaran" if tx["jenis"] == "masuk" else "🔁 Jadikan Pemasukan"
-    return [[{"text": "↩️ Undo", "callback_data": f"d:{tx['id']}"}],
-            [{"text": "✏️ Ubah kategori", "callback_data": f"ek:{tx['id']}"}, {"text": flip, "callback_data": f"et:{tx['id']}"}]] + DASH
-
-
 def autosave_receipt(uid, mid, r):
-    """A clearly-read receipt with a definite category is saved right away — with an instant Undo/Ubah, not silently."""
+    """A clearly-read receipt with a definite category is saved right away — no buttons, just a confirmation."""
     tx = db.add_tx({"jenis": r["jenis"], "jumlah": r["jumlah"], "kategori": r["kategori"], "subkategori": r["subkategori"],
                      "catatan": r["catatan"], "tanggal": r["tanggal"], "waktu": r["waktu"], "sumber": "struk"})
     today = wib().date()
@@ -202,13 +194,12 @@ def autosave_receipt(uid, mid, r):
     bulan = report.sums(today.replace(day=1).isoformat(), today.isoformat())[1]
     text = (f"✅ Tersimpan otomatis dari struk! {'Pemasukan' if tx['jenis'] == 'masuk' else 'Pengeluaran'} {rp(tx['jumlah'])}\n"
             f"📂 {esc(tx['kategori'])} › {esc(tx['subkategori'])}\n🏪 {esc(tx['catatan'])}\n"
-            f"📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}")
-    buttons = tx_buttons(tx)
+            f"📊 Hari ini keluar {rp(hari)} · Bulan ini {rp(bulan)}\nKoreksi/hapus lewat Hermes ya kalau perlu 🙂")
     try:
-        tg.tg_edit(uid, mid, text, buttons)
+        tg.tg_edit(uid, mid, text, [])
     except Exception as e:  # the tx is already committed — never let this be reinterpreted as an OCR-read failure
         log.warning("konfirmasi autosave gagal, kirim baru: %s", e)
-        tg.tg_send(uid, text, buttons=buttons)
+        tg.tg_send(uid, text)
 
 
 def receipt_card(uid, mid, file_id):
@@ -240,17 +231,33 @@ def receipt_card(uid, mid, file_id):
                                     [{"text": flip, "callback_data": "e:t"}], [BATAL]])
 
 
+def _drain_photo_q():
+    """One thread lives only while the queue is non-empty; it processes photos strictly one at a time."""
+    while True:
+        with _photo_q_lock:
+            if not _photo_q:
+                return
+            uid, mid, file_id = _photo_q[0]
+        read_receipt(uid, mid, file_id)
+        with _photo_q_lock:
+            _photo_q.popleft()
+
+
 def on_photo(uid, msg, file):
+    """Every photo is queued and eventually read — sending several in a row never drops any of them."""
     if msg.get("date", 0) < time.time() - 600:
         return tg.tg_send(uid, OFFLINE)
     if not config.OCR_ENABLED:
         return tg.tg_send(uid, OCR_OFF)
     if (file.get("file_size") or 0) > MAX_PHOTO:
         return tg.tg_send(uid, TOO_BIG)
-    if ocr.LOCK.locked():
-        return tg.tg_send(uid, BUSY)
-    mid = tg.tg_send(uid, "⏳ Sedang membaca struk…")["result"]["message_id"]
-    threading.Thread(target=read_receipt, args=(uid, mid, file["file_id"]), daemon=True, name="ocr").start()
+    with _photo_q_lock:
+        ahead = len(_photo_q)
+        text = "⏳ Sedang membaca struk…" if ahead == 0 else f"📥 Struk masuk antrean (nomor {ahead + 1}), tunggu ya ⏳"
+        mid = tg.tg_send(uid, text)["result"]["message_id"]
+        _photo_q.append((uid, mid, file["file_id"]))
+        if ahead == 0:
+            threading.Thread(target=_drain_photo_q, daemon=True, name="ocr").start()
 
 
 def ask_jenis(uid):
@@ -343,25 +350,6 @@ def on_callback(cb):
     if uid not in config.OWNER_IDS:
         return tg.tg_answer_cb(cid)
     key, _, arg = data.partition(":")
-    if key == "d" and arg.isdigit():
-        tg.tg_answer_cb(cid)
-        db.delete_tx(int(arg))
-        return tg.tg_edit(uid, mid, "Dihapus 🗑 Catatan dibatalkan.")
-    if key in ("ek", "et") and arg.isdigit():
-        live = draft(uid)
-        if live and live["msg_id"] != mid:  # a different entry is already mid-flow: never silently discard it
-            return tg.tg_answer_cb(cid, "Selesaikan atau batalkan dulu catatan yang sedang berjalan ya 🙏")
-        tg.tg_answer_cb(cid)
-        tx = db.get_tx(int(arg))
-        if not tx:
-            return
-        jenis = ("masuk" if tx["jenis"] == "keluar" else "keluar") if key == "et" else tx["jenis"]
-        guess = tx["kategori"], tx["subkategori"]
-        if key == "et":
-            guess = parse.guess_kategori(tx["catatan"], jenis)
-        d = {**EMPTY, "jenis": jenis, "jumlah": tx["jumlah"], "catatan": tx["catatan"], "tanggal": tx["tanggal"],
-             "waktu": tx["waktu"], "sumber": tx["sumber"], "edit_id": tx["id"], "guess": guess, "msg_id": mid}
-        return pick_kategori(uid, d)
     d = draft(uid)
     if not d or d["msg_id"] != mid:
         tg.tg_answer_cb(cid, STALE)
@@ -369,9 +357,6 @@ def on_callback(cb):
     tg.tg_answer_cb(cid)
     if key == "x":
         drafts.pop(uid, None)
-        tx = db.get_tx(d["edit_id"]) if d.get("edit_id") else None
-        if tx:  # editing an already-saved tx: it's untouched, not "cancelled" — restore its Undo/Ubah/flip row
-            return tg.tg_edit(uid, mid, "Oke, perubahan dibatalkan — transaksinya tetap tersimpan seperti semula.", tx_buttons(tx))
         tg.tg_edit(uid, mid, "Oke, dibatalkan. Kapan pun siap, ketik lagi ya 🙂")
     elif key == "j":
         d["jenis"], d["fixed"] = ("masuk" if arg == "m" else "keluar"), True

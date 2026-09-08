@@ -1,0 +1,6 @@
+name: finnfinn
+version: 1.1.0
+description: "Baca & kelola data keuangan Finn Finn (ringkasan, daftar/index transaksi per kategori, ubah kategori, hapus) untuk Owner"
+author: dreinst
+license: MIT
+provides_tools: [finnfinn_ringkasan, finnfinn_daftar_transaksi, finnfinn_ubah_kategori, finnfinn_hapus_transaksi]
